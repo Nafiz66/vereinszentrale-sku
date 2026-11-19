@@ -1,0 +1,18 @@
+# Cloudflare Worker für die Vereinszentrale
+name = "sku-vereinszentrale-api"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Adressen, von denen die Seite aufgerufen werden darf (kommagetrennt, ohne / am Ende)
+ALLOWED_ORIGINS = "https://nafiz66.github.io,http://localhost:8000"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "vereinszentrale"
+# nach "npx wrangler d1 create vereinszentrale --jurisdiction eu" hier die ausgegebene ID eintragen
+database_id = "98901721-a637-46c3-9a4d-b31c3953f62e"
+migrations_dir = "migrations"
+
+[observability]
+enabled = true

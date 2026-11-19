@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vereinszentrale · FC Sender Kickers United</title>
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: http://localhost:8787; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="theme-color" content="#14151a">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+<script src="config.js"></script>
+</head>
+<body>
+
+<!-- Anmeldung / Einrichtung -->
+<div id="authScreen" class="authscreen" hidden>
+  <div class="authbox">
+    <img src="logo.png" alt="Wappen FC Sender Kickers United" class="authlogo">
+    <div class="tag">MÜHLACKER · JUGENDFUSSBALL</div>
+    <h1 id="authTitle">Vereinszentrale</h1>
+    <p class="muted" id="authText">Bitte melde dich an.</p>
+
+    <form id="loginForm" hidden>
+      <label>Benutzername<input name="benutzername" autocomplete="username" required autocapitalize="none" spellcheck="false"></label>
+      <label>Passwort<input name="passwort" type="password" autocomplete="current-password" required></label>
+      <label class="check"><input type="checkbox" name="angemeldet_bleiben"> Auf diesem Gerät angemeldet bleiben (30 Tage)</label>
+      <button>Anmelden</button>
+    </form>
+
+    <form id="pwForm" hidden>
+      <label>Aktuelles Passwort<input name="alt" type="password" autocomplete="current-password" required></label>
+      <label>Neues Passwort (mind. 10 Zeichen)<input name="neu" type="password" autocomplete="new-password" required minlength="10"></label>
+      <label>Neues Passwort wiederholen<input name="neu2" type="password" autocomplete="new-password" required minlength="10"></label>
+      <button>Passwort speichern</button>
+      <button type="button" class="quiet" data-act="logout">Abmelden</button>
+    </form>
+
+    <form id="setupForm" hidden>
+      <label>Einrichtungs-Code<input name="token" type="password" required autocomplete="off"></label>
+      <div id="setupAdmins"></div>
+      <button>Drei Admin-Konten anlegen</button>
+    </form>
+
+    <div id="authError" role="alert"></div>
+    <p class="muted small authfoot">Zugang nur für Vorstand und Ausschuss des FC Sender Kickers United. Konten werden ausschließlich von Admins vergeben.</p>
+  </div>
+</div>
+
+<!-- App -->
+<div id="appScreen" hidden>
+<aside>
+  <a class="brand" href="#start">
+    <img src="logo.png" alt="Wappen FC Sender Kickers United" width="46" height="46">
+    <span>FC SENDER KICKERS<br>UNITED <small>MÜHLACKER</small></span>
+  </a>
+  <nav id="nav" aria-label="Vereinsbereiche"></nav>
+  <div class="sidefoot">
+    <div class="userbox"><b id="userName"></b><span id="userRole"></span><button class="quiet" data-act="logout">Abmelden</button></div>
+    Neue Wege. Neue Verantwortung.
+  </div>
+</aside>
+
+<main>
+  <header>
+    <span class="crumb">FC Sender Kickers United <i>/</i> <b id="crumb">Vereinszentrale</b></span>
+    <div class="headactions">
+      <input id="globalSearch" type="search" placeholder="Alles durchsuchen …" aria-label="Alle Einträge durchsuchen">
+      <button id="add">＋ Eintrag</button>
+    </div>
+  </header>
+  <div class="wrap">
+    <section id="hero">
+      <div class="tag">MÜHLACKER · JUGENDFUSSBALL</div>
+      <h1>Vereinszentrale</h1>
+      <p id="heroText">Gründung, Aufgaben und Termine an einem Ort.</p>
+      <img class="herologo" src="logo.png" alt="" aria-hidden="true">
+      <div class="graphic" aria-hidden="true"></div>
+    </section>
+    <div id="notice" role="status"></div>
+    <div id="view">Lädt …</div>
+  </div>
+</main>
+</div>
+
+<!-- Eintrag -->
+<dialog id="editor">
+  <form id="form">
+    <h2 id="formTitle">Eintrag bearbeiten</h2>
+    <label>Titel<input name="titel" required maxlength="160"></label>
+    <div class="fields">
+      <label>Bereich<select name="bereich"></select></label>
+      <label>Status<select name="status"></select></label>
+      <label>Datum<input name="datum" type="date"></label>
+      <label>Uhrzeit<input name="uhrzeit" type="time"></label>
+      <label>Ort<input name="ort" maxlength="120"></label>
+      <label>Zuständig<input name="zustaendig" maxlength="120"></label>
+    </div>
+    <label>Inhalt<textarea name="inhalt" rows="8" maxlength="60000"></textarea></label>
+    <label>Quelle<input name="quelle" maxlength="200"></label>
+    <p class="muted small" id="formMeta"></p>
+    <div id="error" role="alert"></div>
+    <footer>
+      <button type="button" id="remove" class="quiet danger">Löschen</button>
+      <button type="button" id="duplicate" class="quiet">Duplizieren</button>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button id="save">Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Dokument -->
+<dialog id="docEditor">
+  <form id="docForm">
+    <h2 id="docFormTitle">Dokument</h2>
+    <label>Titel<input name="titel" required maxlength="160"></label>
+    <div class="fields">
+      <label>Status<input name="status" maxlength="60" list="docStatusList"></label>
+      <label>Datum<input name="datum" type="date"></label>
+    </div>
+    <datalist id="docStatusList"><option value="Entwurf"><option value="Zur Unterzeichnung"><option value="Für das Notariat"><option value="Unterschrieben"><option value="Eingereicht"><option value="Archiv"></datalist>
+    <label>Beschreibung<textarea name="beschreibung" rows="4" maxlength="4000"></textarea></label>
+    <label>Datei (max. 10 MB)<input name="datei" type="file"></label>
+    <p class="muted small" id="docFileInfo"></p>
+    <div id="docError" role="alert"></div>
+    <footer>
+      <button type="button" id="docRemove" class="quiet danger">Löschen</button>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button id="docSave">Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Benutzer -->
+<dialog id="userEditor">
+  <form id="userForm">
+    <h2 id="userFormTitle">Benutzer</h2>
+    <div class="fields">
+      <label>Benutzername<input name="benutzername" required autocapitalize="none" spellcheck="false" pattern="[a-zA-Z0-9._\-]{3,40}" title="3–40 Zeichen: a–z, 0–9, Punkt, Minus, Unterstrich"></label>
+      <label>Anzeigename<input name="anzeigename" maxlength="80" placeholder="z. B. Max Mustermann"></label>
+      <label>Rolle<select name="rolle"><option value="ausschuss">Ausschuss</option><option value="vorstand">Vorstand</option></select></label>
+      <label class="check" style="align-self:end"><input type="checkbox" name="ist_admin"> Admin (Benutzerverwaltung)</label>
+    </div>
+    <label class="check" id="activeWrap"><input type="checkbox" name="aktiv" checked> Konto aktiv</label>
+    <label id="pwWrap">Startpasswort (mind. 10 Zeichen – wird beim ersten Login geändert)<input name="passwort" type="text" minlength="10" autocomplete="off"></label>
+    <div class="actions" id="pwGen"><button type="button" class="quiet" data-act="genpw">Sicheres Passwort erzeugen</button></div>
+    <div id="userError" role="alert"></div>
+    <footer>
+      <button type="button" id="userRemove" class="quiet danger">Löschen</button>
+      <button type="button" id="userReset" class="quiet">Passwort zurücksetzen</button>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button>Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
+<input id="importJson" type="file" accept=".json,application/json" hidden>
+<script src="app.js"></script>
+</body>
+</html>
