@@ -15,6 +15,7 @@ Browser ──► GitHub Pages (docs/)          nur Oberfläche, keine Daten
 |---|---|---|---|
 | Satzung & Beschlüsse, Vorstand & Ausschuss, Gründungsplan, Offene Entscheidungen | lesen + bearbeiten | **unsichtbar** | – |
 | Beiträge & Ehrenamt, Mannschaften, Elternkommunikation, Sponsoren, Kalender | lesen + bearbeiten | lesen + bearbeiten | – |
+| Mitglieder, Eltern-Verteiler, Datei-Anhänge an Einträgen | lesen + bearbeiten | lesen + bearbeiten (in seinen Bereichen) | – |
 | Einträge löschen | ✓ | ✗ | – |
 | Dokumente, Änderungsprotokoll, JSON-Sicherung | ✓ | **unsichtbar** | – |
 | Benutzer anlegen, Rollen vergeben, Passwörter zurücksetzen, deaktivieren | – | – | ✓ |
@@ -75,6 +76,19 @@ Seite öffnen → **Ersteinrichtung** erscheint automatisch → Einrichtungs-Cod
 
 ### 7. Weitere Personen anlegen
 Als Admin anmelden → **Benutzer** → **＋ Benutzer** → Rolle wählen. Die Seite erzeugt ein Startpasswort. Gib es persönlich oder telefonisch weiter, nicht per WhatsApp oder E-Mail. Beim ersten Login muss jede Person ein eigenes Passwort festlegen.
+
+---
+
+## Dateien hochladen, Mitglieder, Eltern-E-Mails
+
+- **In jedem „＋ Eintrag“-Fenster** gibt es unten den Bereich *Datei*:
+  - **PDF, Word, Bilder …** werden beim Speichern an den Eintrag angehängt (max. 10 MB) und auf der Karte als 📎 angezeigt.
+  - **Excel (.xlsx) oder CSV:** Die Seite zeigt, wie viele Zeilen sie gefunden hat. Mit *Jede Zeile als eigenen Eintrag übernehmen* wird jede Zeile ein Eintrag im gewählten Bereich. Die Spalten (Titel/Mannschaft/Sponsor, Datum, Uhrzeit, Ort, Zuständig/Trainer, Status, Beschreibung) werden an der Überschrift erkannt. Alle anderen Spalten landen im Inhalt. Alternativ: *Nur als Datei anhängen*.
+  - Alte **.xls**-Dateien bitte in Excel als **.xlsx** oder **.csv** speichern.
+- **Mitglieder:** Von Hand mit *＋ Mitglied* oder als ganze Liste mit *CSV/Excel-Datei hochladen*. Erkannte Spalten: Vorname, Nachname (oder „Name“), Geburtsdatum, Mannschaft, E-Mail, Telefon, Mitglied seit, Status, Notiz. Wer schon in der Liste steht (gleicher Name + Geburtsdatum), wird nicht doppelt angelegt.
+- **Elternkommunikation → Eltern-Verteiler:** Eltern mit E-Mail-Adresse eintragen oder importieren. Auf jeder Nachricht gibt es den Knopf *✉ Per E-Mail an Eltern*. Damit öffnet sich dein E-Mail-Programm mit Betreff, Text und allen Eltern (oder nur einer Mannschaft) im **BCC**. Bei sehr vielen Adressen werden sie in die Zwischenablage kopiert und du fügst sie selbst bei BCC ein.
+
+**Datenschutz:** Mitglieder- und Elterndaten sind personenbezogen. Nur eintragen, was der Verein braucht. Ausgetretene Mitglieder auf Status *Ausgetreten* setzen oder löschen (lassen).
 
 ---
 

@@ -164,4 +164,20 @@ label.check input{width:auto}
 .rolebadge.aus{background:#3c304d;color:#e4cdff}
 .rolebadge.adm{background:#484027;color:#ffedaa}
 .lock{color:var(--muted);font-size:13px}
+/* ---- Dateien, Import, Mitglieder, Eltern ---- */
+.err{color:#ffacb2;margin-top:8px}
+.filebox{border:1px dashed #50525e;border-radius:10px;padding:4px 12px 12px;margin:14px 0 0}
+.filebox legend{color:var(--muted);font-size:13px;padding:0 6px}
+.importbox{margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel2);font-size:14px}
+.importbox ul,#importInfo ul{margin:6px 0;padding-left:18px;color:var(--muted);font-size:14px}
+.attachments{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.attachments:empty{display:none}
+.chip{font-size:13px;padding:4px 10px;font-weight:600;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.importhint{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border:1px dashed #50525e;border-radius:9px;margin-top:12px;color:var(--muted);font-size:14px}
+.parentsbox{margin-bottom:14px}
+.parentsbox h3 .muted{font-weight:400}
+.table td.wrap{overflow-wrap:anywhere}
+#memberRemove,#parentRemove{margin-right:auto}
+#importInfo .tablewrap{margin-top:10px;max-height:280px}
+
 @media(max-width:780px){.userbox{display:flex;align-items:center;gap:8px;margin:0}.userbox span{display:none}.userbox button{margin:0 0 0 auto}.sidefoot{font-size:0}}

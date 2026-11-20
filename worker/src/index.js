@@ -21,6 +21,13 @@ const MAX_FAILS = 5, LOCK_MINUTES = 15;
 const MAX_FILE = 10 * 1024 * 1024, CHUNK = 1024 * 1024;
 const ENTRY_FIELDS = ["titel","bereich","status","datum","uhrzeit","ort","zustaendig","inhalt","quelle"];
 const LIMITS = { titel: 160, ort: 120, zustaendig: 120, inhalt: 60000, quelle: 200 };
+const MAX_IMPORT = 1000;
+const MEMBER_FIELDS = ["vorname","nachname","geburtsdatum","mannschaft","email","telefon","eintritt","status","notiz"];
+const MEMBER_LIMITS = { vorname: 80, nachname: 80, geburtsdatum: 10, mannschaft: 80, email: 160, telefon: 60, eintritt: 10, status: 30, notiz: 2000 };
+const MEMBER_STATUSES = ["Aktiv","Passiv","Ausgetreten"];
+const PARENT_FIELDS = ["name","email","kind","mannschaft","notiz"];
+const PARENT_LIMITS = { name: 120, email: 160, kind: 120, mannschaft: 80, notiz: 1000 };
+const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
 
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };
@@ -191,9 +198,15 @@ async function changeOwnPassword(req, env, u) {
 /* ---- Einträge ---- */
 async function listEntries(env, u) {
   const groups = isVorstand(u) ? GROUPS : AUSSCHUSS_GROUPS;
-  const { results } = await env.DB.prepare(
-    `SELECT * FROM eintraege WHERE bereich IN (${groups.map(() => "?").join(",")}) ORDER BY datum, uhrzeit, titel`).bind(...groups).all();
-  return { eintraege: results };
+  const ph = groups.map(() => "?").join(",");
+  const [e, a] = await env.DB.batch([
+    env.DB.prepare(`SELECT * FROM eintraege WHERE bereich IN (${ph}) ORDER BY datum, uhrzeit, titel`).bind(...groups),
+    env.DB.prepare(`SELECT a.id, a.eintrag_id, a.dateiname, a.mime, a.groesse, a.erstellt, a.erstellt_von FROM anhaenge a
+      JOIN eintraege e ON e.id=a.eintrag_id WHERE e.bereich IN (${ph}) ORDER BY a.erstellt`).bind(...groups),
+  ]);
+  const byEntry = {};
+  for (const x of a.results) (byEntry[x.eintrag_id] ||= []).push(x);
+  return { eintraege: e.results.map(r => ({ ...r, anhaenge: byEntry[r.id] || [] })) };
 }
 function readEntry(b, u) {
   const v = {};
@@ -230,9 +243,155 @@ async function deleteEntry(env, u, id) {
   needVorstand(u);
   const old = await env.DB.prepare("SELECT titel FROM eintraege WHERE id=?").bind(id).first();
   if (!old) fail(404, "Eintrag nicht gefunden.");
-  await env.DB.prepare("DELETE FROM eintraege WHERE id=?").bind(id).run();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM anhang_teile WHERE anhang_id IN (SELECT id FROM anhaenge WHERE eintrag_id=?)").bind(id),
+    env.DB.prepare("DELETE FROM anhaenge WHERE eintrag_id=?").bind(id),
+    env.DB.prepare("DELETE FROM eintraege WHERE id=?").bind(id),
+  ]);
   await log(env, u, "Gelöscht", old.titel);
   return { ok: true };
+}
+async function importEntries(req, env, u) {
+  const b = await body(req);
+  if (!Array.isArray(b.eintraege) || !b.eintraege.length) fail(400, "Keine Zeilen zum Importieren.");
+  if (b.eintraege.length > MAX_IMPORT) fail(400, `Höchstens ${MAX_IMPORT} Zeilen auf einmal.`);
+  const rows = b.eintraege.map(r => readEntry(r, u)), t = nowIso();
+  await bulkInsert(env, "eintraege", ENTRY_FIELDS, rows.map(v => ({ ...v, id: uid(), erstellt: t, geaendert: t, geaendert_von: u.anzeigename })));
+  const bereiche = [...new Set(rows.map(r => r.bereich))].join(", ");
+  await log(env, u, "Importiert", `${rows.length} Einträge`, `${bereiche}${b.datei ? " · aus " + clean(b.datei, 200) : ""}`);
+  return { ok: true, anzahl: rows.length };
+}
+
+// Viele Zeilen mit wenigen Abfragen einfügen: Der Free-Tarif erlaubt nur 50 Abfragen pro Anfrage
+// und 100 Parameter pro Abfrage – deshalb als JSON-Paket über json_each().
+async function bulkInsert(env, table, fields, rows) {
+  const cols = ["id", ...fields, "erstellt", "geaendert", "geaendert_von"];
+  const sql = `INSERT INTO ${table}(${cols.join(",")}) SELECT ${cols.map(c => `json_extract(value,'$.${c}')`).join(",")} FROM json_each(?)`;
+  const stmts = []; let chunk = [], size = 0;
+  for (const r of rows) {
+    const s = JSON.stringify(r).length;
+    if (chunk.length && size + s > 800000) { stmts.push(env.DB.prepare(sql).bind(JSON.stringify(chunk))); chunk = []; size = 0; }
+    chunk.push(r); size += s;
+  }
+  if (chunk.length) stmts.push(env.DB.prepare(sql).bind(JSON.stringify(chunk)));
+  await env.DB.batch(stmts);
+}
+
+/* ---- Anhänge an Einträgen (gleiche Rechte wie der Eintrag; löschen nur Vorstand) ---- */
+async function visibleEntry(env, u, id) {
+  const e = await env.DB.prepare("SELECT id, titel, bereich FROM eintraege WHERE id=?").bind(id).first();
+  if (!e || !canSeeGroup(u, e.bereich)) fail(404, "Eintrag nicht gefunden.");
+  return e;
+}
+async function visibleAttachment(env, u, id) {
+  const a = await env.DB.prepare("SELECT a.*, e.bereich, e.titel FROM anhaenge a JOIN eintraege e ON e.id=a.eintrag_id WHERE a.id=?").bind(id).first();
+  if (!a || !canSeeGroup(u, a.bereich)) fail(404, "Anhang nicht gefunden.");
+  return a;
+}
+async function readUpload(req) {
+  const len = Number(req.headers.get("Content-Length") || 0);
+  if (len > MAX_FILE) fail(413, "Datei zu groß (max. 10 MB).");
+  const buf = new Uint8Array(await req.arrayBuffer());
+  if (!buf.length) fail(400, "Leere Datei.");
+  if (buf.length > MAX_FILE) fail(413, "Datei zu groß (max. 10 MB).");
+  let raw = req.headers.get("X-Dateiname") || "datei";
+  try { raw = decodeURIComponent(raw); } catch {}
+  const name = clean(raw, 200).replace(/[\\/:*?"<>|\r\n]/g, "_") || "datei";
+  const mime = clean(req.headers.get("Content-Type") || "application/octet-stream", 100);
+  return { buf, name, mime };
+}
+async function addAttachment(req, env, u, entryId) {
+  const e = await visibleEntry(env, u, entryId);
+  const { buf, name, mime } = await readUpload(req);
+  const id = uid(), t = nowIso();
+  const stmts = [env.DB.prepare("INSERT INTO anhaenge(id,eintrag_id,dateiname,mime,groesse,erstellt,erstellt_von) VALUES(?,?,?,?,?,?,?)")
+    .bind(id, entryId, name, mime, buf.length, t, u.anzeigename)];
+  for (let i = 0, nr = 0; i < buf.length; i += CHUNK, nr++)
+    stmts.push(env.DB.prepare("INSERT INTO anhang_teile(anhang_id,nr,daten) VALUES(?,?,?)").bind(id, nr, buf.slice(i, i + CHUNK)));
+  await env.DB.batch(stmts);
+  await log(env, u, "Datei angehängt", e.titel, name);
+  return { ok: true, id };
+}
+async function downloadAttachment(env, u, id, cors) {
+  const a = await visibleAttachment(env, u, id);
+  const { results } = await env.DB.prepare("SELECT daten FROM anhang_teile WHERE anhang_id=? ORDER BY nr").bind(id).all();
+  const out = new Uint8Array(a.groesse); let o = 0;
+  for (const r of results) { const part = new Uint8Array(r.daten); out.set(part, o); o += part.length; }
+  return new Response(out, { headers: { "Content-Type": a.mime || "application/octet-stream",
+    "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(a.dateiname)}`, ...SECURITY, ...cors } });
+}
+async function deleteAttachment(env, u, id) {
+  needVorstand(u);
+  const a = await visibleAttachment(env, u, id);
+  await env.DB.batch([env.DB.prepare("DELETE FROM anhang_teile WHERE anhang_id=?").bind(id), env.DB.prepare("DELETE FROM anhaenge WHERE id=?").bind(id)]);
+  await log(env, u, "Anhang gelöscht", a.titel, a.dateiname);
+  return { ok: true };
+}
+
+/* ---- Mitglieder & Eltern-Verteiler (Vorstand + Ausschuss; löschen nur Vorstand) ---- */
+function readMember(b) {
+  const v = {};
+  for (const k of MEMBER_FIELDS) v[k] = clean(b[k], MEMBER_LIMITS[k]);
+  if (!v.vorname && !v.nachname) fail(400, "Bitte Vor- oder Nachnamen eingeben.");
+  if (!validDate(v.geburtsdatum) || !validDate(v.eintritt)) fail(400, `${v.vorname} ${v.nachname}: Datum ungültig.`);
+  if (v.email && !EMAIL_RE.test(v.email)) fail(400, `${v.vorname} ${v.nachname}: E-Mail-Adresse ungültig.`);
+  if (!MEMBER_STATUSES.includes(v.status)) v.status = "Aktiv";
+  return v;
+}
+function readParent(b) {
+  const v = {};
+  for (const k of PARENT_FIELDS) v[k] = clean(b[k], PARENT_LIMITS[k]);
+  v.email = v.email.toLowerCase();
+  if (!EMAIL_RE.test(v.email)) fail(400, `E-Mail-Adresse ungültig: „${v.email || "leer"}“`);
+  return v;
+}
+const PEOPLE = {
+  mitglieder: { table: "mitglieder", fields: MEMBER_FIELDS, read: readMember, order: "nachname, vorname", label: "Mitglied",
+    name: v => `${v.vorname} ${v.nachname}`.trim(), key: v => `${v.vorname}|${v.nachname}|${v.geburtsdatum}`.toLowerCase() },
+  eltern: { table: "eltern", fields: PARENT_FIELDS, read: readParent, order: "mannschaft, name, email", label: "Eltern",
+    name: v => v.name || v.email, key: v => v.email.toLowerCase() },
+};
+async function listPeople(env, P) {
+  const { results } = await env.DB.prepare(`SELECT * FROM ${P.table} ORDER BY ${P.order}`).all();
+  return { liste: results };
+}
+async function savePerson(req, env, u, P, id) {
+  const b = await body(req), v = P.read(b), t = nowIso(), isNew = !id;
+  if (id) {
+    const old = await env.DB.prepare(`SELECT geaendert FROM ${P.table} WHERE id=?`).bind(id).first();
+    if (!old) fail(404, "Nicht gefunden.");
+    if (b.geaendert && b.geaendert !== old.geaendert) fail(409, "Jemand anderes hat diesen Datensatz inzwischen geändert. Bitte neu laden.");
+    await env.DB.prepare(`UPDATE ${P.table} SET ${P.fields.map(k => k + "=?").join(",")}, geaendert=?, geaendert_von=? WHERE id=?`)
+      .bind(...P.fields.map(k => v[k]), t, u.anzeigename, id).run();
+  } else {
+    id = uid();
+    await env.DB.prepare(`INSERT INTO ${P.table}(id,${P.fields.join(",")},erstellt,geaendert,geaendert_von) VALUES(?,${P.fields.map(() => "?").join(",")},?,?,?)`)
+      .bind(id, ...P.fields.map(k => v[k]), t, t, u.anzeigename).run();
+  }
+  await log(env, u, isNew ? `${P.label} angelegt` : `${P.label} geändert`, P.name(v));
+  return listPeople(env, P);
+}
+async function importPeople(req, env, u, P) {
+  const b = await body(req);
+  if (!Array.isArray(b.liste) || !b.liste.length) fail(400, "Keine Zeilen zum Importieren.");
+  if (b.liste.length > MAX_IMPORT) fail(400, `Höchstens ${MAX_IMPORT} Zeilen auf einmal.`);
+  const rows = b.liste.map(P.read), t = nowIso();
+  const { results } = await env.DB.prepare(`SELECT ${P.fields.join(",")} FROM ${P.table}`).all();
+  const seen = new Set(results.map(P.key)), neu = [];
+  for (const v of rows) { const k = P.key(v); if (!seen.has(k)) { seen.add(k); neu.push(v); } }
+  if (neu.length) {
+    await bulkInsert(env, P.table, P.fields, neu.map(v => ({ ...v, id: uid(), erstellt: t, geaendert: t, geaendert_von: u.anzeigename })));
+    await log(env, u, "Importiert", `${neu.length} × ${P.label}`, b.datei ? "aus " + clean(b.datei, 200) : "");
+  }
+  return { ...(await listPeople(env, P)), neu: neu.length, doppelt: rows.length - neu.length };
+}
+async function deletePerson(env, u, P, id) {
+  needVorstand(u);
+  const old = await env.DB.prepare(`SELECT * FROM ${P.table} WHERE id=?`).bind(id).first();
+  if (!old) fail(404, "Nicht gefunden.");
+  await env.DB.prepare(`DELETE FROM ${P.table} WHERE id=?`).bind(id).run();
+  await log(env, u, `${P.label} gelöscht`, P.name(old));
+  return listPeople(env, P);
 }
 
 /* ---- Dokumente (nur Vorstand) ---- */
@@ -359,7 +518,11 @@ async function exportAll(env) {
   const e = await env.DB.prepare("SELECT * FROM eintraege ORDER BY bereich, datum").all();
   const d = await env.DB.prepare("SELECT * FROM dokumente").all();
   const p = await env.DB.prepare("SELECT * FROM protokoll ORDER BY id").all();
-  return { format: "sku-vereinszentrale", exportiert: nowIso(), eintraege: e.results, dokumente: d.results, protokoll: p.results };
+  const mg = await env.DB.prepare("SELECT * FROM mitglieder ORDER BY nachname, vorname").all();
+  const el = await env.DB.prepare("SELECT * FROM eltern ORDER BY mannschaft, name").all();
+  const an = await env.DB.prepare("SELECT id, eintrag_id, dateiname, mime, groesse, erstellt, erstellt_von FROM anhaenge").all();
+  return { format: "sku-vereinszentrale", exportiert: nowIso(), eintraege: e.results, dokumente: d.results, protokoll: p.results,
+    mitglieder: mg.results, eltern: el.results, anhaenge: an.results };
 }
 
 /* ---------------- Router ---------------- */
@@ -383,9 +546,24 @@ async function route(req, env, cors) {
 
   if (p === "/api/eintraege" && M === "GET") return json(await listEntries(env, u), 200, cors);
   if (p === "/api/eintraege" && M === "POST") return json(await createEntry(req, env, u), 200, cors);
+  if (p === "/api/eintraege/import" && M === "POST") return json(await importEntries(req, env, u), 200, cors);
   if ((m = p.match(/^\/api\/eintraege\/([\w-]+)$/))) {
     if (M === "PUT") return json(await updateEntry(req, env, u, m[1]), 200, cors);
     if (M === "DELETE") return json(await deleteEntry(env, u, m[1]), 200, cors);
+  }
+  if ((m = p.match(/^\/api\/eintraege\/([\w-]+)\/anhaenge$/)) && M === "POST") return json(await addAttachment(req, env, u, m[1]), 200, cors);
+  if ((m = p.match(/^\/api\/anhaenge\/([\w-]+)$/))) {
+    if (M === "GET") return downloadAttachment(env, u, m[1], cors);
+    if (M === "DELETE") return json(await deleteAttachment(env, u, m[1]), 200, cors);
+  }
+
+  if ((m = p.match(/^\/api\/(mitglieder|eltern)(?:\/([\w-]+))?$/))) {
+    const P = PEOPLE[m[1]], id = m[2];
+    if (!id && M === "GET") return json(await listPeople(env, P), 200, cors);
+    if (!id && M === "POST") return json(await savePerson(req, env, u, P, null), 200, cors);
+    if (id === "import" && M === "POST") return json(await importPeople(req, env, u, P), 200, cors);
+    if (id && id !== "import" && M === "PUT") return json(await savePerson(req, env, u, P, id), 200, cors);
+    if (id && id !== "import" && M === "DELETE") return json(await deletePerson(env, u, P, id), 200, cors);
   }
 
   if (p.startsWith("/api/dokumente") || p === "/api/protokoll" || p === "/api/export") needVorstand(u);

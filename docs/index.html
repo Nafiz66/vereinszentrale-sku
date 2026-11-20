@@ -100,6 +100,12 @@
     </div>
     <label>Inhalt<textarea name="inhalt" rows="8" maxlength="60000"></textarea></label>
     <label>Quelle<input name="quelle" maxlength="200"></label>
+    <fieldset class="filebox">
+      <legend>Datei</legend>
+      <div id="attachList" class="attachments"></div>
+      <label>PDF anhängen oder Excel/CSV einlesen (max. 10 MB)<input name="datei" type="file"></label>
+      <div id="importBox" class="importbox" hidden></div>
+    </fieldset>
     <p class="muted small" id="formMeta"></p>
     <div id="error" role="alert"></div>
     <footer>
@@ -156,6 +162,86 @@
   </form>
 </dialog>
 
+<!-- Mitglied -->
+<dialog id="memberEditor">
+  <form id="memberForm">
+    <h2 id="memberFormTitle">Mitglied</h2>
+    <div class="importhint" id="memberHint"><span>Viele Mitglieder auf einmal?</span><button type="button" class="quiet" data-act="importPeople" data-kind="mitglieder">CSV/Excel-Datei hochladen</button></div>
+    <div class="fields">
+      <label>Vorname<input name="vorname" maxlength="80"></label>
+      <label>Nachname<input name="nachname" maxlength="80"></label>
+      <label>Geburtsdatum<input name="geburtsdatum" type="date"></label>
+      <label>Mannschaft<input name="mannschaft" maxlength="80" list="teamList"></label>
+      <label>E-Mail<input name="email" type="email" maxlength="160"></label>
+      <label>Telefon<input name="telefon" type="tel" maxlength="60"></label>
+      <label>Mitglied seit<input name="eintritt" type="date"></label>
+      <label>Status<select name="status"></select></label>
+    </div>
+    <label>Notiz<textarea name="notiz" rows="3" maxlength="2000"></textarea></label>
+    <p class="muted small" id="memberMeta"></p>
+    <div id="memberError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" id="memberRemove" class="quiet danger">Löschen</button>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button>Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Eltern -->
+<dialog id="parentEditor">
+  <form id="parentForm">
+    <h2 id="parentFormTitle">Eltern</h2>
+    <div class="importhint" id="parentHint"><span>Viele Adressen auf einmal?</span><button type="button" class="quiet" data-act="importPeople" data-kind="eltern">CSV/Excel-Datei hochladen</button></div>
+    <div class="fields">
+      <label>Name (Mutter/Vater)<input name="name" maxlength="120"></label>
+      <label>E-Mail<input name="email" type="email" required maxlength="160"></label>
+      <label>Kind<input name="kind" maxlength="120"></label>
+      <label>Mannschaft<input name="mannschaft" maxlength="80" list="teamList"></label>
+    </div>
+    <label>Notiz<textarea name="notiz" rows="2" maxlength="1000"></textarea></label>
+    <div id="parentError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" id="parentRemove" class="quiet danger">Löschen</button>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button>Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- E-Mail an Eltern -->
+<dialog id="mailDialog">
+  <form id="mailForm">
+    <h2>E-Mail an Eltern</h2>
+    <label>An<select name="mannschaft"></select></label>
+    <p class="muted small" id="mailCount"></p>
+    <label>Betreff<input name="betreff" maxlength="200"></label>
+    <label>Text<textarea name="text" rows="9"></textarea></label>
+    <p class="muted small">Dein E-Mail-Programm öffnet sich. Alle Eltern stehen im <b>BCC</b>, so sieht niemand die Adressen der anderen. Du musst nur noch auf „Senden“ klicken.</p>
+    <div id="mailError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" class="quiet" data-act="copyMails">Adressen kopieren</button>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button>E-Mail-Programm öffnen</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Import-Vorschau -->
+<dialog id="importDialog">
+  <form id="importForm">
+    <h2 id="importTitle">Importieren</h2>
+    <div id="importInfo"></div>
+    <div id="importError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button id="importGo">Importieren</button>
+    </footer>
+  </form>
+</dialog>
+
+<datalist id="teamList"></datalist>
+<input id="peopleFile" type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm,.xls" hidden>
 <input id="importJson" type="file" accept=".json,application/json" hidden>
 <script src="app.js"></script>
 </body>

@@ -20,9 +20,15 @@ const options = (values, sel) => values.map(v => `<option${v===sel?" selected":"
 const badge = s => s ? `<span class="badge" data-s="${esc(s)}">${esc(s)}</span>` : "";
 const ROLE = { vorstand: "Vorstand", ausschuss: "Ausschuss" };
 
-let me = null, entries = [], docs = [], users = [];
+const MEMBER_STATUSES = ["Aktiv","Passiv","Ausgetreten"];
+const MAX_FILE = 10 * 1024 * 1024, MAX_IMPORT = 1000;
+const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
+
+let me = null, entries = [], docs = [], users = [], members = [], parents = [];
 let sections = [], section = 0, filter = "", search = "", calMonth = today().slice(0,7), calView = "monat";
-let activeId = null, activeDocId = null, activeUserId = null;
+let mFilter = { q: "", team: "", status: "" };
+let activeId = null, activeDocId = null, activeUserId = null, activeMemberId = null, activeParentId = null;
+let pendingSheet = null, pendingPeople = null;
 
 /* ---------------- Sitzung & API ---------------- */
 const store = () => localStorage.getItem("vz_token") ? localStorage : sessionStorage;
@@ -111,7 +117,7 @@ $("setupForm").onsubmit = e => { e.preventDefault(); busy(e.target, async () => 
 
 async function logout() {
   try { await api("/api/logout", { method: "POST" }); } catch {}
-  clearToken(); me = null; entries = docs = users = []; showLogin("Du wurdest abgemeldet.");
+  clearToken(); me = null; entries = docs = users = members = parents = []; showLogin("Du wurdest abgemeldet.");
 }
 let idleTimer;
 function resetIdle() {
@@ -123,7 +129,7 @@ function resetIdle() {
 /* ---------------- App-Aufbau ---------------- */
 const isVorstand = () => me?.rolle === "vorstand";
 function buildSections() {
-  sections = ["Übersicht", ...GROUPS.filter(g => me.bereiche.includes(g))];
+  sections = ["Übersicht", ...GROUPS.filter(g => me.bereiche.includes(g)), "Mitglieder"];
   if (isVorstand()) sections.push("Dokumente", "Änderungsprotokoll");
   if (me.ist_admin) sections.push("Benutzer");
   sections.push("Mein Konto");
@@ -142,7 +148,8 @@ async function startApp() {
 }
 async function reload() {
   try {
-    const jobs = [api("/api/eintraege").then(r => entries = r.eintraege)];
+    const jobs = [api("/api/eintraege").then(r => entries = r.eintraege),
+      api("/api/mitglieder").then(r => members = r.liste), api("/api/eltern").then(r => parents = r.liste)];
     if (isVorstand()) jobs.push(api("/api/dokumente").then(r => docs = r.dokumente));
     if (me.ist_admin) jobs.push(api("/api/benutzer").then(r => users = r.benutzer));
     await Promise.all(jobs);
@@ -155,7 +162,7 @@ function notice(text, ok = false) { const n = $("notice"); n.textContent = text;
 function renderNav() {
   const c = {}; for (const r of entries) if (r.status !== "Erledigt") c[r.bereich] = (c[r.bereich] || 0) + 1;
   $("nav").innerHTML = sections.map((s, i) => {
-    const sep = ["Dokumente","Benutzer","Mein Konto"].includes(s) && !["Dokumente","Benutzer"].includes(sections[i-1]) ? '<div class="navsep"></div>' : "";
+    const sep = ["Mitglieder","Dokumente","Benutzer","Mein Konto"].includes(s) && !["Mitglieder","Dokumente","Benutzer"].includes(sections[i-1]) ? '<div class="navsep"></div>' : "";
     const n = c[s] ? `<span class="count">${c[s]}</span>` : "";
     return `${sep}<a href="${route(i)}"${i===section?' aria-current="page"':""}>${esc(s)}${n}</a>`;
   }).join("");
@@ -165,13 +172,15 @@ function card(r, showGroup = false) {
   const meta = [dateText(r.datum) + (r.uhrzeit ? " · " + r.uhrzeit + " Uhr" : ""), r.ort, r.zustaendig, r.quelle].filter(Boolean).map(esc).join(" · ");
   const body = r.inhalt ? `<p class="body">${esc(r.inhalt)}</p>` : "";
   const parent = r.bereich === "Elternkommunikation";
+  const files = (r.anhaenge || []).map(a => `<button class="quiet chip" data-att="${esc(a.id)}" title="${esc(a.dateiname)} öffnen">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>`).join("");
   return `<article class="card">${showGroup ? `<div class="meta">${esc(r.bereich)}</div>` : ""}<div class="cardtop"><h3>${esc(r.titel)}</h3>${badge(r.status)}</div>
     ${meta ? `<div class="meta">${meta}</div>` : ""}
     ${r.inhalt.length > 1700 ? `<details><summary>Volltext anzeigen</summary>${body}</details>` : body}
+    ${files ? `<div class="attachments">${files}</div>` : ""}
     <div class="actions">
       <button class="quiet" data-edit="${esc(r.id)}">Bearbeiten</button>
       ${!["Erledigt","Bestätigt"].includes(r.status) ? `<button class="quiet" data-done="${esc(r.id)}">✓ Erledigt</button>` : ""}
-      ${parent ? `<button class="quiet" data-copy="${esc(r.id)}">Text kopieren</button><a class="btnlink quiet" target="_blank" rel="noopener noreferrer" href="https://wa.me/?text=${encodeURIComponent(r.inhalt)}">Per WhatsApp teilen</a>` : ""}
+      ${parent ? `<button class="quiet" data-mail="${esc(r.id)}">✉ Per E-Mail an Eltern</button><button class="quiet" data-copy="${esc(r.id)}">Text kopieren</button><a class="btnlink quiet" target="_blank" rel="noopener noreferrer" href="https://wa.me/?text=${encodeURIComponent(r.inhalt)}">Per WhatsApp teilen</a>` : ""}
     </div></article>`;
 }
 function mini(items, empty) {
@@ -182,15 +191,16 @@ function mini(items, empty) {
 function render(reset = false) {
   if (!me) return;
   const next = Number(location.hash.match(/^#bereich-(\d+)$/)?.[1]) || 0;
-  if (reset || next !== section) { filter = ""; search = ""; }
+  if (reset || next !== section) { filter = ""; search = ""; mFilter = { q: "", team: "", status: "" }; }
   section = next < sections.length ? next : 0;
   const name = sections[section];
   $("hero").hidden = section !== 0;
   $("crumb").textContent = section ? name : "Vereinszentrale";
   $("add").hidden = ["Änderungsprotokoll","Mein Konto"].includes(name);
-  $("add").textContent = name === "Dokumente" ? "＋ Dokument" : name === "Benutzer" ? "＋ Benutzer" : "＋ Eintrag";
+  $("add").textContent = name === "Dokumente" ? "＋ Dokument" : name === "Benutzer" ? "＋ Benutzer" : name === "Mitglieder" ? "＋ Mitglied" : "＋ Eintrag";
   renderNav();
   if (!section) renderHome();
+  else if (name === "Mitglieder") renderMembers();
   else if (name === "Dokumente") renderDocs();
   else if (name === "Änderungsprotokoll") renderLog();
   else if (name === "Benutzer") renderUsers();
@@ -237,6 +247,7 @@ function renderGroup(name) {
       <button class="quiet" data-act="calView" data-v="liste"${calView==="liste"?" disabled":""}>Liste</button>
       <button class="quiet" data-act="ics">Kalender exportieren (.ics)</button></div>` : ""}</div>
     ${cal && calView === "monat" ? '<div id="calendar"></div>' : ""}
+    ${name === "Elternkommunikation" ? parentsPanel() : ""}
     <div class="filters">
       <input id="search" type="search" placeholder="Einträge durchsuchen" aria-label="Einträge durchsuchen" value="${esc(search)}">
       <select id="filter" aria-label="Status filtern"><option value="">Alle Status</option>${options(STATUSES, filter)}</select>
@@ -279,6 +290,70 @@ function shiftMonth(delta) {
   if ($("month")) $("month").value = calMonth; renderCalendar(); renderCards();
 }
 
+/* ---------------- Mitglieder ---------------- */
+const distinct = list => [...new Set(list.map(s => String(s || "").trim()).filter(Boolean))].sort((a,b) => a.localeCompare(b, "de"));
+const memberName = m => [m.vorname, m.nachname].filter(Boolean).join(" ");
+function age(d) {
+  if (!d) return "";
+  const [y, m, dd] = d.split("-").map(Number), [ty, tm, td] = today().split("-").map(Number);
+  return ty - y - (tm < m || (tm === m && td < dd) ? 1 : 0);
+}
+function renderMembers() {
+  const teams = distinct(members.map(m => m.mannschaft));
+  $("view").innerHTML = `<div class="sectionhead"><h2>Mitglieder</h2><div class="actions" style="margin:0">
+      <button class="quiet" data-act="importPeople" data-kind="mitglieder">CSV/Excel-Datei hochladen</button>
+      <button class="quiet" data-act="membersCsv">Als CSV exportieren</button></div></div>
+    <div class="filters">
+      <input id="msearch" type="search" placeholder="Name, E-Mail, Telefon …" aria-label="Mitglieder durchsuchen" value="${esc(mFilter.q)}">
+      <select id="mteam" aria-label="Mannschaft filtern"><option value="">Alle Mannschaften</option>${options(teams, mFilter.team)}</select>
+      <select id="mstatus" aria-label="Status filtern"><option value="">Alle Status</option>${options(MEMBER_STATUSES, mFilter.status)}</select>
+    </div><div id="mtable"></div>`;
+  $("msearch").oninput = e => { mFilter.q = e.target.value; renderMemberTable(); };
+  $("mteam").onchange = e => { mFilter.team = e.target.value; renderMemberTable(); };
+  $("mstatus").onchange = e => { mFilter.status = e.target.value; renderMemberTable(); };
+  renderMemberTable();
+}
+function filteredMembers() {
+  const q = mFilter.q.trim().toLocaleLowerCase("de");
+  return members.filter(m => (!mFilter.team || m.mannschaft === mFilter.team) && (!mFilter.status || m.status === mFilter.status)
+    && (!q || [m.vorname, m.nachname, m.email, m.telefon, m.mannschaft, m.notiz].join(" ").toLocaleLowerCase("de").includes(q)));
+}
+function renderMemberTable() {
+  const list = filteredMembers();
+  if (!members.length) {
+    $("mtable").innerHTML = `<section class="card"><h3>Noch keine Mitglieder</h3><p class="muted" style="margin-top:6px">Klicke oben auf <b>＋ Mitglied</b>, um jemanden von Hand einzutragen,
+      oder auf <b>CSV/Excel-Datei hochladen</b>, um eine ganze Liste zu übernehmen. Die Spalten (Vorname, Nachname, Geburtsdatum, Mannschaft, E-Mail, Telefon …) werden automatisch erkannt.</p></section>`;
+    return;
+  }
+  $("mtable").innerHTML = `<p class="muted small" style="margin-bottom:8px">${list.length} von ${members.length} Mitgliedern · ${members.filter(m => m.status === "Aktiv").length} aktiv</p>
+    <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Geburtsdatum</th><th>Mannschaft</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th></th></tr></thead><tbody>
+    ${list.map(m => `<tr><td><b>${esc(memberName(m))}</b></td><td>${m.geburtsdatum ? `${esc(dateText(m.geburtsdatum))} <span class="lock">(${age(m.geburtsdatum)})</span>` : ""}</td>
+      <td>${esc(m.mannschaft)}</td><td class="wrap">${m.email ? `<a class="link" href="mailto:${esc(m.email)}">${esc(m.email)}</a>` : ""}</td><td>${esc(m.telefon)}</td>
+      <td>${m.status === "Aktiv" ? "aktiv" : `<span class="lock">${esc(m.status.toLowerCase())}</span>`}</td>
+      <td><button class="quiet" data-memberedit="${esc(m.id)}">Bearbeiten</button></td></tr>`).join("") || '<tr><td colspan="7" class="muted">Keine Treffer.</td></tr>'}
+    </tbody></table></div>`;
+}
+function exportMembersCsv() {
+  const cols = [["vorname","Vorname"],["nachname","Nachname"],["geburtsdatum","Geburtsdatum"],["mannschaft","Mannschaft"],["email","E-Mail"],["telefon","Telefon"],["eintritt","Mitglied seit"],["status","Status"],["notiz","Notiz"]];
+  const cell = v => `"${String(v ?? "").replace(/"/g,'""')}"`;
+  const rows = filteredMembers().map(m => cols.map(([k]) => cell(/datum|eintritt/.test(k) ? dateText(m[k]) : m[k])).join(";"));
+  download(new Blob(["﻿" + [cols.map(c => c[1]).join(";"), ...rows].join("\r\n")], {type:"text/csv;charset=utf-8"}), `mitglieder_${today()}.csv`);
+}
+
+/* ---------------- Eltern-Verteiler ---------------- */
+function parentsPanel() {
+  const rows = parents.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.kind)}</td><td>${esc(p.mannschaft)}</td><td class="wrap">${esc(p.email)}</td>
+    <td><button class="quiet" data-parentedit="${esc(p.id)}">Bearbeiten</button></td></tr>`).join("");
+  return `<section class="card parentsbox"><div class="cardtop"><h3>Eltern-Verteiler <span class="muted small">${parents.length} ${parents.length === 1 ? "Adresse" : "Adressen"}</span></h3>
+      <div class="actions" style="margin:0"><button class="quiet" data-act="addParent">＋ Eltern</button>
+      <button class="quiet" data-act="importPeople" data-kind="eltern">CSV/Excel-Datei hochladen</button>
+      ${parents.length ? '<button class="quiet" data-act="mailAll">✉ E-Mail an Eltern</button>' : ""}</div></div>
+    ${parents.length ? `<details${parents.length <= 8 ? " open" : ""}><summary>Liste anzeigen</summary><div class="tablewrap" style="margin-top:8px"><table class="table">
+      <thead><tr><th>Name</th><th>Kind</th><th>Mannschaft</th><th>E-Mail</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></details>`
+      : '<p class="muted small" style="margin-top:8px">Noch keine Eltern eingetragen. Füge Adressen einzeln hinzu oder lade eine CSV/Excel-Liste hoch.</p>'}
+  </section>`;
+}
+
 function renderDocs() {
   $("view").innerHTML = `<div class="sectionhead"><h2>Dokumente</h2></div>
     <p class="muted" style="margin-bottom:18px;max-width:78ch">Nur für den Vorstand sichtbar. Dateien werden in der Vereinsdatenbank gespeichert (max. 10 MB pro Datei).</p>
@@ -303,7 +378,7 @@ async function renderLog() {
 function renderUsers() {
   const roleBadge = u => `<span class="rolebadge${u.rolle === "ausschuss" ? " aus" : ""}">${ROLE[u.rolle]}</span>${u.ist_admin ? ' <span class="rolebadge adm">Admin</span>' : ""}`;
   $("view").innerHTML = `<div class="sectionhead"><h2>Benutzer</h2><span class="muted small">${users.length} Konten</span></div>
-    <p class="muted" style="margin-bottom:14px;max-width:80ch"><b>Vorstand</b> sieht und bearbeitet alles. <b>Ausschuss</b> sieht und bearbeitet nur ${esc(["Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender"].join(", "))} und darf nichts löschen. <b>Admin</b> verwaltet zusätzlich die Benutzer.</p>
+    <p class="muted" style="margin-bottom:14px;max-width:80ch"><b>Vorstand</b> sieht und bearbeitet alles. <b>Ausschuss</b> sieht und bearbeitet nur ${esc(["Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender","Mitglieder"].join(", "))} und darf nichts löschen. <b>Admin</b> verwaltet zusätzlich die Benutzer.</p>
     <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Benutzername</th><th>Rolle</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead><tbody>
     ${users.map(u => `<tr><td><b>${esc(u.anzeigename)}</b></td><td>${esc(u.benutzername)}</td><td>${roleBadge(u)}</td><td class="lock">${esc(u.letzter_login ? fmtTime(u.letzter_login) : "noch nie")}</td>
       <td>${u.aktiv ? (u.pw_aendern ? '<span class="lock">wartet auf 1. Login</span>' : "aktiv") : '<span class="lock">deaktiviert</span>'}</td>
@@ -358,7 +433,13 @@ async function importJsonFile(file) {
   let data; try { data = JSON.parse(await file.text()); } catch { return notice("JSON-Datei konnte nicht gelesen werden."); }
   const list = data.eintraege || data.records || (Array.isArray(data) ? data : null);
   if (!Array.isArray(list)) return notice("Keine Einträge in der Datei gefunden.");
-  if (!confirm(`${list.length} Einträge als neue Einträge importieren?`)) return;
+  const extra = [["mitglieder", "Mitglieder"], ["eltern", "Eltern-Adressen"]].filter(([k]) => Array.isArray(data[k]) && data[k].length);
+  if (!confirm(`${list.length} Einträge als neue Einträge importieren?${extra.map(([k, l]) => `\nDazu ${data[k].length} ${l} (Doppelte werden übersprungen).`).join("")}`)) return;
+  for (const [k] of extra) {
+    const keys = k === "mitglieder" ? MEMBER_KEYS : PARENT_KEYS;
+    for (let i = 0; i < data[k].length; i += MAX_IMPORT)
+      try { await api(`/api/${k}/import`, { method: "POST", data: { liste: data[k].slice(i, i + MAX_IMPORT).map(x => Object.fromEntries(keys.map(f => [f, x[f] ?? ""]))), datei: file.name } }); } catch (e) { notice(e.message); }
+  }
   let n = 0;
   for (const r of list) {
     const v = { titel: r.titel ?? r.title, bereich: GROUPS.includes(r.bereich ?? r.group) ? (r.bereich ?? r.group) : "Offene Entscheidungen",
@@ -369,6 +450,259 @@ async function importJsonFile(file) {
   }
   notice(`${n} Einträge importiert.`, true); reload();
 }
+
+/* ---------------- Tabellen lesen (CSV + Excel .xlsx, ohne fremde Bibliothek) ---------------- */
+const SHEET_RE = /\.(csv|tsv|xlsx|xlsm|xls)$/i;
+async function readTable(file) {
+  const buf = await file.arrayBuffer();
+  if (/\.xls$/i.test(file.name)) throw new Error("Alte .xls-Dateien kann die Seite nicht lesen. Bitte in Excel „Speichern unter“ → .xlsx oder .csv wählen.");
+  if (/\.(xlsx|xlsm)$/i.test(file.name)) return readXlsx(buf);
+  let text;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(buf); } catch { text = new TextDecoder("windows-1252").decode(buf); }
+  return parseCsv(text);
+}
+function parseCsv(text) {
+  text = text.replace(/^﻿/, "");
+  const first = text.split(/\r?\n/, 1)[0] || "";
+  const delim = [";", ",", "\t"].map(d => [d, first.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = []; let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
+    else if (c === '"' && cell === "") q = true;
+    else if (c === delim) { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") { if (c === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+    else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+async function unzip(buf) {
+  const dv = new DataView(buf), u8 = new Uint8Array(buf), dec = new TextDecoder();
+  let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error("Die Datei ist keine gültige Excel-Datei (.xlsx).");
+  const files = {}; let p = dv.getUint32(eocd + 16, true);
+  for (let n = dv.getUint16(eocd + 10, true); n > 0 && dv.getUint32(p, true) === 0x02014b50; n--) {
+    const nlen = dv.getUint16(p + 28, true), elen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+    files[dec.decode(u8.subarray(p + 46, p + 46 + nlen))] = { method: dv.getUint16(p + 10, true), size: dv.getUint32(p + 20, true), off: dv.getUint32(p + 42, true) };
+    p += 46 + nlen + elen + clen;
+  }
+  return async name => {
+    const f = files[name]; if (!f) return null;
+    const start = f.off + 30 + dv.getUint16(f.off + 26, true) + dv.getUint16(f.off + 28, true);
+    const data = u8.subarray(start, start + f.size);
+    if (f.method === 0) return dec.decode(data);
+    if (f.method !== 8 || typeof DecompressionStream === "undefined") throw new Error("Dieser Browser kann die Excel-Datei nicht lesen. Bitte als CSV speichern oder einen aktuellen Browser verwenden.");
+    return new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).text();
+  };
+}
+async function readXlsx(buf) {
+  const get = await unzip(buf);
+  const xml = s => new DOMParser().parseFromString(s, "application/xml");
+  const all = (el, tag) => [...el.getElementsByTagNameNS("*", tag)];
+  const text = el => all(el, "t").map(t => t.textContent).join("");
+  let sheetPath = "xl/worksheets/sheet1.xml";
+  const wb = await get("xl/workbook.xml"), rels = await get("xl/_rels/workbook.xml.rels");
+  if (wb && rels) {
+    const first = all(xml(wb), "sheet")[0];
+    const rid = first && (first.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") || first.getAttribute("r:id"));
+    const rel = all(xml(rels), "Relationship").find(r => r.getAttribute("Id") === rid);
+    if (rel) { const t = rel.getAttribute("Target"); sheetPath = t.startsWith("/") ? t.slice(1) : "xl/" + t.replace(/^\.\//, ""); }
+  }
+  const ss = await get("xl/sharedStrings.xml");
+  const shared = ss ? all(xml(ss), "si").map(text) : [];
+  const sheet = await get(sheetPath);
+  if (!sheet) throw new Error("In der Excel-Datei wurde keine Tabelle gefunden.");
+  const colIndex = ref => { let n = 0; for (const ch of ref.replace(/\d+$/, "").toUpperCase()) n = n * 26 + ch.charCodeAt(0) - 64; return n - 1; };
+  const rows = [];
+  for (const row of all(xml(sheet), "row")) {
+    const r = row.getAttribute("r"), ri = r ? Number(r) - 1 : rows.length, cells = [];
+    let ci = 0;
+    for (const c of all(row, "c")) {
+      const ref = c.getAttribute("r"); if (ref) ci = colIndex(ref);
+      const t = c.getAttribute("t"), v = all(c, "v")[0]?.textContent ?? "";
+      cells[ci++] = t === "s" ? (shared[Number(v)] ?? "") : t === "inlineStr" ? text(c) : t === "b" ? (v === "1" ? "WAHR" : "FALSCH") : v;
+    }
+    rows[ri] = Array.from(cells, x => x ?? "");
+  }
+  return Array.from(rows, r => r || []);
+}
+// Erste nicht-leere Zeile = Überschriften, danach die Datenzeilen
+function toRecords(table) {
+  const filled = r => r.some(c => String(c ?? "").trim());
+  const h = table.findIndex(filled);
+  if (h < 0) throw new Error("Die Datei ist leer.");
+  return { headers: table[h].map(c => String(c ?? "").trim()), rows: table.slice(h + 1).filter(filled) };
+}
+const norm = s => String(s ?? "").toLowerCase().replace(/ä/g,"ae").replace(/ö/g,"oe").replace(/ü/g,"ue").replace(/ß/g,"ss").replace(/[^a-z0-9]/g,"");
+// Spalten anhand der Überschrift zuordnen: erst exakte Treffer, dann „beginnt mit“
+function mapColumns(headers, aliases) {
+  const keys = headers.map(norm), used = new Set(), map = {};
+  for (const exact of [true, false]) for (const [field, names] of Object.entries(aliases)) {
+    if (map[field] !== undefined) continue;
+    const i = keys.findIndex((k, j) => k && !used.has(j) && names.some(a => exact ? k === a : a.length >= 4 && k.startsWith(a)));
+    if (i >= 0) { map[field] = i; used.add(i); }
+  }
+  return { map, extra: headers.map((h, i) => i).filter(i => !used.has(i) && headers[i]) };
+}
+const cellOf = (row, i) => i === undefined ? "" : String(row[i] ?? "").trim();
+const extraText = (row, headers, extra) => extra.map(i => cellOf(row, i) && `${headers[i]}: ${cellOf(row, i)}`).filter(Boolean).join("\n");
+function isoDate(y, m, d) {
+  const dt = new Date(Date.UTC(+y, +m - 1, +d));
+  return dt.getUTCFullYear() === +y && dt.getUTCMonth() === +m - 1 && dt.getUTCDate() === +d ? dt.toISOString().slice(0, 10) : null;
+}
+// "" = leer, null = nicht erkennbar
+function parseDate(v) {
+  v = String(v ?? "").trim(); if (!v) return "";
+  if (/^\d+(\.\d+)?$/.test(v) && +v > 1000 && +v < 80000) return new Date(Date.UTC(1899, 11, 30) + Math.floor(+v) * 864e5).toISOString().slice(0, 10);
+  let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) return isoDate(m[1], m[2], m[3]);
+  m = v.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$/);
+  if (m) { let y = +m[3]; if (y < 100) y += y > (new Date().getFullYear() % 100) + 1 ? 1900 : 2000; return isoDate(y, m[2], m[1]); }
+  return null;
+}
+function parseTime(v) {
+  v = String(v ?? "").trim(); if (!v) return "";
+  if (/^0?\.\d+$/.test(v) || v === "0") { const mins = Math.round(+v * 1440) % 1440; return `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`; }
+  const m = v.match(/^(\d{1,2})(?:[:.](\d{2}))?(?::\d{2})?\s*(?:uhr)?$/i);
+  return m && +m[1] < 24 && +(m[2] || 0) < 60 ? `${m[1].padStart(2, "0")}:${m[2] || "00"}` : null;
+}
+
+const ENTRY_ALIASES = {
+  titel: ["titel","title","bezeichnung","name","mannschaft","team","sponsor","firma","unternehmen","aufgabe","betreff","thema","schritt","veranstaltung","termin"],
+  status: ["status","stand"],
+  datum: ["datum","date","tag","frist","faellig","faelligam","deadline","spieltag"],
+  uhrzeit: ["uhrzeit","zeit","time","beginn","anstoss","start"],
+  ort: ["ort","platz","sportplatz","spielort","adresse","location"],
+  zustaendig: ["zustaendig","verantwortlich","trainer","ansprechpartner","kontakt","betreuer","owner"],
+  inhalt: ["inhalt","beschreibung","notiz","notizen","bemerkung","bemerkungen","text","details","info"],
+  quelle: ["quelle","source"],
+};
+function sheetToEntries(t, bereich) {
+  const { map, extra } = mapColumns(t.headers, ENTRY_ALIASES);
+  if (map.titel === undefined) { map.titel = extra.shift() ?? 0; }
+  const defStatus = bereich === "Kalender" ? "Geplant" : "Offen";
+  return t.rows.map(r => {
+    const notes = [], d = parseDate(cellOf(r, map.datum)), z = parseTime(cellOf(r, map.uhrzeit));
+    if (d === null) notes.push(`Datum: ${cellOf(r, map.datum)}`);
+    if (z === null) notes.push(`Uhrzeit: ${cellOf(r, map.uhrzeit)}`);
+    const st = STATUSES.find(s => s.toLowerCase() === cellOf(r, map.status).toLowerCase());
+    if (!st && cellOf(r, map.status)) notes.push(`Status: ${cellOf(r, map.status)}`);
+    return { titel: cellOf(r, map.titel).slice(0, 160), bereich, status: st || defStatus, datum: d || "", uhrzeit: z || "",
+      ort: cellOf(r, map.ort).slice(0, 120), zustaendig: cellOf(r, map.zustaendig).slice(0, 120),
+      inhalt: [cellOf(r, map.inhalt), extraText(r, t.headers, extra), ...notes].filter(Boolean).join("\n"), quelle: cellOf(r, map.quelle).slice(0, 200) };
+  }).filter(v => v.titel);
+}
+const columnInfo = (headers, map, labels) => Object.entries(map).map(([f, i]) => `${labels[f] || f} ← „${esc(headers[i])}“`).join(", ");
+
+const MEMBER_ALIASES = {
+  vorname: ["vorname","firstname","rufname"],
+  nachname: ["nachname","familienname","lastname","surname","zuname"],
+  voll: ["name","vollername","spieler","spielerin","mitglied","kind","kindname","spielername"],
+  geburtsdatum: ["geburtsdatum","geboren","gebdatum","geburtstag","geb","gebam","birthday","geburt"],
+  mannschaft: ["mannschaft","team","jahrgang","altersklasse","gruppe","klasse"],
+  email: ["email","mail","emailadresse","emaileltern","elternemail"],
+  telefon: ["telefon","tel","handy","mobil","mobilnummer","telefonnummer","phone","handynummer"],
+  eintritt: ["eintritt","eintrittsdatum","mitgliedseit","beitritt","aufnahme","eintrittam"],
+  status: ["status"],
+  notiz: ["notiz","notizen","bemerkung","bemerkungen","info","hinweis","kommentar"],
+};
+const MEMBER_LABELS = { vorname: "Vorname", nachname: "Nachname", voll: "Name", geburtsdatum: "Geburtsdatum", mannschaft: "Mannschaft", email: "E-Mail", telefon: "Telefon", eintritt: "Mitglied seit", status: "Status", notiz: "Notiz" };
+function sheetToMembers(t) {
+  const { map, extra } = mapColumns(t.headers, MEMBER_ALIASES), skipped = [];
+  const list = t.rows.map((r, n) => {
+    let vorname = cellOf(r, map.vorname), nachname = cellOf(r, map.nachname);
+    const voll = cellOf(r, map.voll);
+    if (voll && !vorname && !nachname) {
+      if (voll.includes(",")) [nachname, vorname] = voll.split(",").map(s => s.trim());
+      else { const parts = voll.split(/\s+/); nachname = parts.pop(); vorname = parts.join(" "); }
+    } else if (voll && !nachname) nachname = voll; else if (voll && !vorname) vorname = voll;
+    const notes = [cellOf(r, map.notiz), extraText(r, t.headers, extra)];
+    const geb = parseDate(cellOf(r, map.geburtsdatum)), ein = parseDate(cellOf(r, map.eintritt));
+    if (geb === null) notes.push(`Geburtsdatum: ${cellOf(r, map.geburtsdatum)}`);
+    if (ein === null) notes.push(`Mitglied seit: ${cellOf(r, map.eintritt)}`);
+    const mails = cellOf(r, map.email).split(/[;,\s]+/).filter(Boolean);
+    const email = mails.find(m => EMAIL_RE.test(m)) || "";
+    if (mails.some(m => m !== email)) notes.push(`E-Mail: ${mails.filter(m => m !== email).join(", ")}`);
+    const st = MEMBER_STATUSES.find(s => s.toLowerCase() === cellOf(r, map.status).toLowerCase());
+    if (!st && cellOf(r, map.status)) notes.push(`Status: ${cellOf(r, map.status)}`);
+    if (!vorname && !nachname) { skipped.push(`Zeile ${n + 2}: kein Name`); return null; }
+    return { vorname: vorname.slice(0, 80), nachname: nachname.slice(0, 80), geburtsdatum: geb || "", mannschaft: cellOf(r, map.mannschaft).slice(0, 80),
+      email: email.slice(0, 160), telefon: cellOf(r, map.telefon).slice(0, 60), eintritt: ein || "", status: st || "Aktiv",
+      notiz: notes.filter(Boolean).join("\n").slice(0, 2000) };
+  }).filter(Boolean);
+  return { list, skipped, info: columnInfo(t.headers, map, MEMBER_LABELS), extra: extra.map(i => t.headers[i]),
+    cols: [["Name", m => memberName(m)], ["Geburtsdatum", m => dateText(m.geburtsdatum)], ["Mannschaft", m => m.mannschaft], ["E-Mail", m => m.email], ["Telefon", m => m.telefon]] };
+}
+
+const PARENT_ALIASES = {
+  email: ["email","mail","emailadresse","emaileltern","elternemail","emailadresseeltern","kontaktemail"],
+  kind: ["kind","kinder","spieler","spielerin","sohn","tochter","kindname","namekind","namedeskindes","mitglied","spielername"],
+  name: ["name","eltern","elternteil","erziehungsberechtigter","erziehungsberechtigte","vater","mutter","ansprechpartner","kontakt","elternname","nameeltern"],
+  mannschaft: ["mannschaft","team","jahrgang","altersklasse","gruppe","klasse"],
+  notiz: ["notiz","notizen","bemerkung","bemerkungen","info","hinweis","telefon","tel","handy"],
+};
+const PARENT_LABELS = { email: "E-Mail", kind: "Kind", name: "Name", mannschaft: "Mannschaft", notiz: "Notiz" };
+function sheetToParents(t) {
+  const { map, extra } = mapColumns(t.headers, PARENT_ALIASES), skipped = [], list = [];
+  if (map.email === undefined) {
+    // keine E-Mail-Spalte erkannt: Spalte suchen, in der E-Mail-Adressen stehen
+    const i = t.headers.findIndex((h, j) => t.rows.some(r => EMAIL_RE.test(cellOf(r, j))));
+    if (i >= 0) { map.email = i; extra.splice(extra.indexOf(i), 1); }
+  }
+  t.rows.forEach((r, n) => {
+    const mails = cellOf(r, map.email).split(/[;,\s]+/).filter(Boolean);
+    const ok = mails.filter(m => EMAIL_RE.test(m));
+    if (!ok.length) { skipped.push(`Zeile ${n + 2}: keine gültige E-Mail${mails.length ? ` („${mails.join(", ")}“)` : ""}`); return; }
+    const notiz = [cellOf(r, map.notiz), extraText(r, t.headers, extra)].filter(Boolean).join("\n").slice(0, 1000);
+    for (const email of ok) list.push({ name: cellOf(r, map.name).slice(0, 120), email: email.toLowerCase().slice(0, 160), kind: cellOf(r, map.kind).slice(0, 120), mannschaft: cellOf(r, map.mannschaft).slice(0, 80), notiz });
+  });
+  return { list, skipped, info: columnInfo(t.headers, map, PARENT_LABELS), extra: extra.map(i => t.headers[i]),
+    cols: [["Name", p => p.name], ["E-Mail", p => p.email], ["Kind", p => p.kind], ["Mannschaft", p => p.mannschaft]] };
+}
+
+/* ---------------- Mitglieder/Eltern importieren ---------------- */
+let peopleKind = "mitglieder";
+function pickPeopleFile(kind) { peopleKind = kind; $("peopleFile").click(); }
+$("peopleFile").onchange = async e => {
+  const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+  try {
+    if (file.size > MAX_FILE) throw new Error("Datei zu groß (max. 10 MB).");
+    const res = (peopleKind === "mitglieder" ? sheetToMembers : sheetToParents)(toRecords(await readTable(file)));
+    pendingPeople = { kind: peopleKind, list: res.list, datei: file.name };
+    const label = peopleKind === "mitglieder" ? "Mitglieder" : "Eltern-Adressen";
+    $("importTitle").textContent = `${label} importieren`;
+    $("importError").textContent = "";
+    $("importGo").hidden = !res.list.length;
+    $("importGo").textContent = `${res.list.length} ${label} übernehmen`;
+    $("importInfo").innerHTML = `<p>Datei „${esc(file.name)}“: <b>${res.list.length} ${label}</b> erkannt.</p>
+      <ul><li>Erkannte Spalten: ${res.info || "keine"}</li>
+      ${res.extra.length ? `<li>Weitere Spalten kommen in die Notiz: ${res.extra.map(h => `„${esc(h)}“`).join(", ")}</li>` : ""}
+      ${res.skipped.length ? `<li>Übersprungen: ${res.skipped.length} Zeilen (${esc(res.skipped.slice(0, 4).join("; "))}${res.skipped.length > 4 ? " …" : ""})</li>` : ""}
+      <li>Wer schon in der Liste steht, wird nicht doppelt angelegt.</li></ul>
+      ${res.list.length ? `<div class="tablewrap"><table class="table"><thead><tr>${res.cols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead><tbody>
+        ${res.list.slice(0, 8).map(x => `<tr>${res.cols.map(c => `<td>${esc(c[1](x))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
+        ${res.list.length > 8 ? `<p class="muted small" style="margin-top:6px">… und ${res.list.length - 8} weitere</p>` : ""}` : ""}`;
+    $("memberEditor").close(); $("parentEditor").close();
+    $("importDialog").showModal();
+  } catch (err) { notice(err.message); }
+};
+$("importForm").onsubmit = async e => {
+  e.preventDefault(); if (!pendingPeople) return;
+  const { kind, list, datei } = pendingPeople;
+  $("importGo").disabled = true; $("importError").textContent = "";
+  try {
+    let neu = 0, doppelt = 0, r;
+    for (let i = 0; i < list.length; i += MAX_IMPORT) {
+      r = await api(`/api/${kind}/import`, { method: "POST", data: { liste: list.slice(i, i + MAX_IMPORT), datei } });
+      neu += r.neu; doppelt += r.doppelt;
+    }
+    if (kind === "mitglieder") members = r.liste; else parents = r.liste;
+    $("importDialog").close(); pendingPeople = null; render();
+    notice(`${neu} neu übernommen${doppelt ? `, ${doppelt} waren schon vorhanden` : ""}.`, true);
+  } catch (err) { $("importError").textContent = err.message; }
+  finally { $("importGo").disabled = false; }
+};
 
 /* ---------------- Einträge ---------------- */
 const form = $("form"), editor = $("editor"), field = n => form.elements.namedItem(n);
@@ -383,18 +717,79 @@ function edit(rec, preset = {}) {
   field("status").innerHTML = options(STATUSES, rec?.status || preset.status || (cur === "Kalender" ? "Geplant" : "Offen"));
   for (const k of ["titel","datum","uhrzeit","ort","zustaendig","inhalt","quelle"]) field(k).value = rec?.[k] ?? preset[k] ?? "";
   $("formMeta").textContent = rec ? `Zuletzt geändert ${fmtTime(rec.geaendert)} von ${rec.geaendert_von}` : "";
+  field("datei").value = ""; pendingSheet = null; $("importBox").hidden = true; $("importBox").innerHTML = "";
+  renderAttachList(rec);
   editor.showModal(); field("titel").focus();
+}
+function renderAttachList(rec) {
+  $("attachList").innerHTML = (rec?.anhaenge || []).map(a => `<span><button type="button" class="quiet chip" data-att="${esc(a.id)}">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>${me.darf_loeschen ? `<button type="button" class="quiet danger chip" data-attdel="${esc(a.id)}" aria-label="${esc(a.dateiname)} löschen">✕</button>` : ""}</span>`).join("");
+}
+field("datei").onchange = async () => {
+  const f = field("datei").files[0], box = $("importBox");
+  pendingSheet = null; box.hidden = true; box.innerHTML = ""; $("error").textContent = "";
+  if (!f) return;
+  if (f.size > MAX_FILE) { $("error").textContent = "Datei zu groß (max. 10 MB)."; field("datei").value = ""; return; }
+  if (!field("titel").value.trim()) field("titel").value = f.name.replace(/\.[^.]+$/, "").slice(0, 160);
+  box.hidden = false;
+  const attachNote = `„${esc(f.name)}“ wird beim <b>Speichern</b> an diesen Eintrag angehängt.`;
+  if (!SHEET_RE.test(f.name)) { box.innerHTML = `<p>${attachNote}</p>`; return; }
+  box.innerHTML = '<p class="muted">Datei wird gelesen …</p>';
+  try {
+    const t = toRecords(await readTable(f));
+    const { map } = mapColumns(t.headers, ENTRY_ALIASES);
+    const preview = sheetToEntries(t, field("bereich").value);
+    if (!preview.length) throw new Error("In der Datei wurden keine Zeilen gefunden.");
+    pendingSheet = { t, datei: f.name };
+    box.innerHTML = `<p>In „${esc(f.name)}“ stehen <b>${preview.length} Zeilen</b>. Was soll passieren?</p>
+      <ul><li>Erkannte Spalten: ${columnInfo(t.headers, map, { titel: "Titel", status: "Status", datum: "Datum", uhrzeit: "Uhrzeit", ort: "Ort", zustaendig: "Zuständig", inhalt: "Inhalt", quelle: "Quelle" }) || `Titel ← erste Spalte`}</li>
+      <li>Beispiele: ${preview.slice(0, 3).map(v => `„${esc(v.titel)}“`).join(", ")}${preview.length > 3 ? " …" : ""}</li></ul>
+      <div class="actions"><button type="button" data-act="sheetImport">Jede Zeile als eigenen Eintrag übernehmen (${preview.length})</button>
+      <button type="button" class="quiet" data-act="sheetAttach">Nur als Datei anhängen</button></div>`;
+  } catch (err) {
+    box.innerHTML = `<p class="err" style="margin:0 0 6px">${esc(err.message)}</p><p>${attachNote}</p>`;
+  }
+};
+async function importSheetEntries() {
+  if (!pendingSheet) return;
+  const bereich = field("bereich").value, list = sheetToEntries(pendingSheet.t, bereich);
+  const btn = $("importBox").querySelector("[data-act=sheetImport]"); btn.disabled = true; btn.textContent = "Wird übernommen …";
+  try {
+    let n = 0;
+    for (let i = 0; i < list.length; i += MAX_IMPORT) n += (await api("/api/eintraege/import", { method: "POST", data: { eintraege: list.slice(i, i + MAX_IMPORT), datei: pendingSheet.datei } })).anzahl;
+    editor.close(); notice(`${n} Einträge in „${bereich}“ übernommen.`, true); await reload();
+  } catch (err) { $("error").textContent = err.message; btn.disabled = false; btn.textContent = "Erneut versuchen"; }
+}
+async function uploadAttachment(entryId, file) {
+  await api(`/api/eintraege/${entryId}/anhaenge`, { method: "POST", raw: file, headers: { "Content-Type": file.type || "application/octet-stream", "X-Dateiname": encodeURIComponent(file.name) } });
+}
+function findAttachment(id) { for (const r of entries) for (const a of r.anhaenge || []) if (a.id === id) return a; }
+async function openAttachment(id) {
+  const a = findAttachment(id); if (!a) return;
+  const win = window.open("", "_blank");
+  try {
+    const blob = new Blob([await api(`/api/anhaenge/${id}`, { blob: true })], { type: a.mime || "application/octet-stream" });
+    const viewable = /^(application\/pdf|image\/|text\/plain)/.test(a.mime);
+    if (win && viewable) { const url = URL.createObjectURL(blob); win.location = url; setTimeout(() => URL.revokeObjectURL(url), 120000); }
+    else { if (win) win.close(); download(blob, a.dateiname); }
+  } catch (e) { if (win) win.close(); notice(e.message); }
+}
+async function deleteAttachment(id) {
+  const a = findAttachment(id); if (!a || !confirm(`Datei „${a.dateiname}“ wirklich löschen?`)) return;
+  try { await api(`/api/anhaenge/${id}`, { method: "DELETE" }); await reload(); renderAttachList(entries.find(r => r.id === activeId)); notice("Datei gelöscht.", true); }
+  catch (e) { $("error").textContent = e.message; }
 }
 form.onsubmit = async e => {
   e.preventDefault();
   const v = Object.fromEntries(FIELDS.map(k => [k, String(field(k).value || "").trim()]));
+  const file = field("datei").files[0];
   $("save").disabled = true; $("error").textContent = "";
   try {
-    if (activeId) await api("/api/eintraege/" + activeId, { method: "PUT", data: { ...v, geaendert: entries.find(r => r.id === activeId)?.geaendert } });
-    else await api("/api/eintraege", { method: "POST", data: v });
-    editor.close(); notice(activeId ? "Eintrag gespeichert." : "Eintrag angelegt.", true); await reload();
-  } catch (err) { $("error").textContent = err.message; }
-  finally { $("save").disabled = false; }
+    const r = activeId ? await api("/api/eintraege/" + activeId, { method: "PUT", data: { ...v, geaendert: entries.find(x => x.id === activeId)?.geaendert } })
+                       : await api("/api/eintraege", { method: "POST", data: v });
+    if (file) { $("save").textContent = "Lädt hoch …"; activeId = r.eintrag.id; await uploadAttachment(r.eintrag.id, file); }
+    editor.close(); notice(file ? "Eintrag mit Datei gespeichert." : activeId ? "Eintrag gespeichert." : "Eintrag angelegt.", true); await reload();
+  } catch (err) { $("error").textContent = err.message; await reload(); }
+  finally { $("save").disabled = false; $("save").textContent = "Speichern"; }
 };
 $("remove").onclick = async () => {
   const r = entries.find(x => x.id === activeId);
@@ -497,8 +892,99 @@ $("userRemove").onclick = async () => {
   catch (err) { $("userError").textContent = err.message; }
 };
 
+/* ---------------- Mitglied / Eltern bearbeiten ---------------- */
+function fillTeams() { $("teamList").innerHTML = distinct([...members.map(m => m.mannschaft), ...parents.map(p => p.mannschaft)]).map(t => `<option value="${esc(t)}">`).join(""); }
+const memberForm = $("memberForm"), mfield = n => memberForm.elements.namedItem(n);
+const MEMBER_KEYS = ["vorname","nachname","geburtsdatum","mannschaft","email","telefon","eintritt","status","notiz"];
+function editMember(id) {
+  activeMemberId = id || null; const m = members.find(x => x.id === id);
+  $("memberFormTitle").textContent = m ? memberName(m) : "Mitglied anlegen";
+  $("memberHint").hidden = !!m; $("memberRemove").hidden = !m || !me.darf_loeschen; $("memberError").textContent = "";
+  mfield("status").innerHTML = options(MEMBER_STATUSES, m?.status || "Aktiv");
+  for (const k of MEMBER_KEYS) if (k !== "status") mfield(k).value = m?.[k] ?? "";
+  $("memberMeta").textContent = m ? `Zuletzt geändert ${fmtTime(m.geaendert)} von ${m.geaendert_von}` : "";
+  fillTeams(); $("memberEditor").showModal(); mfield("vorname").focus();
+}
+memberForm.onsubmit = async e => {
+  e.preventDefault(); $("memberError").textContent = "";
+  const data = Object.fromEntries(MEMBER_KEYS.map(k => [k, String(mfield(k).value || "").trim()]));
+  if (!data.vorname && !data.nachname) { $("memberError").textContent = "Bitte Vor- oder Nachnamen eingeben."; return; }
+  try {
+    const old = members.find(x => x.id === activeMemberId);
+    members = (await api(activeMemberId ? "/api/mitglieder/" + activeMemberId : "/api/mitglieder", { method: activeMemberId ? "PUT" : "POST", data: { ...data, geaendert: old?.geaendert } })).liste;
+    $("memberEditor").close(); notice("Mitglied gespeichert.", true); render();
+  } catch (err) { $("memberError").textContent = err.message; }
+};
+$("memberRemove").onclick = async () => {
+  const m = members.find(x => x.id === activeMemberId);
+  if (!m || !confirm(`${memberName(m)} wirklich aus der Mitgliederliste löschen?\n\nTipp: Bei Austritt lieber Status „Ausgetreten“ wählen.`)) return;
+  try { members = (await api("/api/mitglieder/" + m.id, { method: "DELETE" })).liste; $("memberEditor").close(); notice("Mitglied gelöscht.", true); render(); }
+  catch (err) { $("memberError").textContent = err.message; }
+};
+
+const parentForm = $("parentForm"), pfield = n => parentForm.elements.namedItem(n);
+const PARENT_KEYS = ["name","email","kind","mannschaft","notiz"];
+function editParent(id) {
+  activeParentId = id || null; const p = parents.find(x => x.id === id);
+  $("parentFormTitle").textContent = p ? "Eltern bearbeiten" : "Eltern hinzufügen";
+  $("parentHint").hidden = !!p; $("parentRemove").hidden = !p || !me.darf_loeschen; $("parentError").textContent = "";
+  for (const k of PARENT_KEYS) pfield(k).value = p?.[k] ?? "";
+  fillTeams(); $("parentEditor").showModal(); pfield("name").focus();
+}
+parentForm.onsubmit = async e => {
+  e.preventDefault(); $("parentError").textContent = "";
+  const data = Object.fromEntries(PARENT_KEYS.map(k => [k, String(pfield(k).value || "").trim()]));
+  if (!EMAIL_RE.test(data.email)) { $("parentError").textContent = "Bitte eine gültige E-Mail-Adresse eingeben."; return; }
+  if (!activeParentId && parents.some(p => p.email.toLowerCase() === data.email.toLowerCase()) && !confirm(`${data.email} steht schon im Verteiler. Trotzdem noch einmal eintragen?`)) return;
+  try {
+    const old = parents.find(x => x.id === activeParentId);
+    parents = (await api(activeParentId ? "/api/eltern/" + activeParentId : "/api/eltern", { method: activeParentId ? "PUT" : "POST", data: { ...data, geaendert: old?.geaendert } })).liste;
+    $("parentEditor").close(); notice("Eltern-Adresse gespeichert.", true); render();
+  } catch (err) { $("parentError").textContent = err.message; }
+};
+$("parentRemove").onclick = async () => {
+  const p = parents.find(x => x.id === activeParentId);
+  if (!p || !confirm(`${p.email} aus dem Eltern-Verteiler löschen?`)) return;
+  try { parents = (await api("/api/eltern/" + p.id, { method: "DELETE" })).liste; $("parentEditor").close(); notice("Adresse gelöscht.", true); render(); }
+  catch (err) { $("parentError").textContent = err.message; }
+};
+
+/* ---------------- E-Mail an Eltern (über das eigene E-Mail-Programm, alle im BCC) ---------------- */
+const mailForm = $("mailForm"), xfield = n => mailForm.elements.namedItem(n);
+const recipients = () => { const t = xfield("mannschaft").value; return [...new Set(parents.filter(p => !t || p.mannschaft === t).map(p => p.email.toLowerCase()))]; };
+function updateMailCount() { const n = recipients().length; $("mailCount").textContent = n ? `${n} Empfänger` : "Keine Empfänger für diese Auswahl."; }
+function openMail(entryId) {
+  if (!parents.length) return notice("Im Eltern-Verteiler stehen noch keine Adressen. Füge sie oben bei „Eltern-Verteiler“ hinzu.");
+  const r = entries.find(x => x.id === entryId);
+  const teams = distinct(parents.map(p => p.mannschaft));
+  xfield("mannschaft").innerHTML = `<option value="">Alle Eltern (${new Set(parents.map(p => p.email.toLowerCase())).size})</option>` +
+    teams.map(t => `<option value="${esc(t)}">Nur ${esc(t)} (${new Set(parents.filter(p => p.mannschaft === t).map(p => p.email.toLowerCase())).size})</option>`).join("");
+  xfield("betreff").value = r ? r.titel : ""; xfield("text").value = r ? r.inhalt : "";
+  $("mailError").textContent = ""; updateMailCount(); $("mailDialog").showModal();
+}
+xfield("mannschaft").onchange = updateMailCount;
+async function copyMails() {
+  const list = recipients(); if (!list.length) return;
+  try { await navigator.clipboard.writeText(list.join("; ")); notice(`${list.length} Adressen kopiert.`, true); } catch { $("mailError").textContent = "Kopieren fehlgeschlagen."; }
+}
+mailForm.onsubmit = async e => {
+  e.preventDefault();
+  const list = recipients();
+  if (!list.length) { $("mailError").textContent = "Keine Empfänger für diese Auswahl."; return; }
+  const q = `subject=${encodeURIComponent(xfield("betreff").value)}&body=${encodeURIComponent(xfield("text").value.replace(/\r?\n/g, "\r\n"))}`;
+  let url = `mailto:?bcc=${list.map(encodeURIComponent).join(",")}&${q}`;
+  if (url.length > 1900) {
+    // Sehr lange Adresslisten passen nicht in einen mailto-Link: Adressen in die Zwischenablage
+    try { await navigator.clipboard.writeText(list.join("; ")); } catch { $("mailError").textContent = "Adressen konnten nicht kopiert werden. Bitte „Adressen kopieren“ versuchen."; return; }
+    alert(`Es sind ${list.length} Empfänger – zu viele für einen direkten Link.\n\nDie Adressen sind jetzt kopiert. Im E-Mail-Programm bei „BCC“ klicken und mit Strg+V einfügen.`);
+    url = `mailto:?${q}`;
+  }
+  location.href = url;
+  $("mailDialog").close();
+};
+
 /* ---------------- Ereignisse ---------------- */
-$("add").onclick = () => { const n = sections[section]; n === "Dokumente" ? editDoc() : n === "Benutzer" ? editUser() : edit(); };
+$("add").onclick = () => { const n = sections[section]; n === "Dokumente" ? editDoc() : n === "Benutzer" ? editUser() : n === "Mitglieder" ? editMember() : edit(); };
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => b.closest("dialog").close());
 $("importJson").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) importJsonFile(f); };
 $("globalSearch").addEventListener("keydown", e => {
@@ -518,7 +1004,19 @@ document.addEventListener("click", async e => {
   if (ds.docdl) return openDoc(ds.docdl, true);
   if (ds.docedit) return editDoc(ds.docedit);
   if (ds.useredit) return editUser(ds.useredit);
+  if (ds.att) return openAttachment(ds.att);
+  if (ds.attdel) return deleteAttachment(ds.attdel);
+  if (ds.memberedit) return editMember(ds.memberedit);
+  if (ds.parentedit) return editParent(ds.parentedit);
+  if (ds.mail) return openMail(ds.mail);
   switch (ds.act) {
+    case "importPeople": return pickPeopleFile(ds.kind);
+    case "membersCsv": return exportMembersCsv();
+    case "addParent": return editParent();
+    case "mailAll": return openMail(null);
+    case "copyMails": return copyMails();
+    case "sheetImport": return importSheetEntries();
+    case "sheetAttach": pendingSheet = null; $("importBox").innerHTML = `<p>„${esc(field("datei").files[0]?.name || "")}“ wird beim <b>Speichern</b> an diesen Eintrag angehängt.</p>`; return;
     case "logout": return logout();
     case "changepw": return showPwChange();
     case "genpw": ufield("passwort").value = genPassword(); return;
