@@ -10,8 +10,9 @@
 <meta name="theme-color" content="#14151a">
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<link rel="stylesheet" href="style.css">
-<script src="config.js"></script>
+<meta http-equiv="Cache-Control" content="no-cache">
+<link rel="stylesheet" href="style.css?v=3">
+<script src="config.js?v=3"></script>
 </head>
 <body>
 
@@ -98,6 +99,8 @@
       <label>Ort<input name="ort" maxlength="120"></label>
       <label>Zuständig<input name="zustaendig" maxlength="120"></label>
     </div>
+    <p id="visHint" class="vishint"></p>
+    <label class="check"><input type="checkbox" name="rueckmeldung"> Rückmeldung erwünscht (Knöpfe „Ich nehme teil / Vielleicht / Leider nicht“)</label>
     <label>Inhalt<textarea name="inhalt" rows="8" maxlength="60000"></textarea></label>
     <label>Quelle<input name="quelle" maxlength="200"></label>
     <fieldset class="filebox">
@@ -243,6 +246,6 @@
 <datalist id="teamList"></datalist>
 <input id="peopleFile" type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm,.xls" hidden>
 <input id="importJson" type="file" accept=".json,application/json" hidden>
-<script src="app.js"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>

@@ -20,6 +20,9 @@ const options = (values, sel) => values.map(v => `<option${v===sel?" selected":"
 const badge = s => s ? `<span class="badge" data-s="${esc(s)}">${esc(s)}</span>` : "";
 const ROLE = { vorstand: "Vorstand", ausschuss: "Ausschuss" };
 
+const AUSSCHUSS_GROUPS = ["Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender"];
+const vorstandOnly = bereich => !AUSSCHUSS_GROUPS.includes(bereich);
+const ANSWERS = [["ja", "✓ Ich nehme teil"], ["vielleicht", "? Vielleicht"], ["nein", "✗ Leider nicht"]];
 const MEMBER_STATUSES = ["Aktiv","Passiv","Ausgetreten"];
 const MAX_FILE = 10 * 1024 * 1024, MAX_IMPORT = 1000;
 const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
@@ -173,15 +176,36 @@ function card(r, showGroup = false) {
   const body = r.inhalt ? `<p class="body">${esc(r.inhalt)}</p>` : "";
   const parent = r.bereich === "Elternkommunikation";
   const files = (r.anhaenge || []).map(a => `<button class="quiet chip" data-att="${esc(a.id)}" title="${esc(a.dateiname)} öffnen">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>`).join("");
-  return `<article class="card">${showGroup ? `<div class="meta">${esc(r.bereich)}</div>` : ""}<div class="cardtop"><h3>${esc(r.titel)}</h3>${badge(r.status)}</div>
+  const lock = isVorstand() && vorstandOnly(r.bereich) ? ' <span class="lockmark" title="Der Ausschuss sieht diesen Eintrag nicht">🔒 nur Vorstand</span>' : "";
+  return `<article class="card">${showGroup ? `<div class="meta">${esc(r.bereich)}${lock}</div>` : ""}<div class="cardtop"><h3>${esc(r.titel)}${showGroup ? "" : lock}</h3>${badge(r.status)}</div>
     ${meta ? `<div class="meta">${meta}</div>` : ""}
     ${r.inhalt.length > 1700 ? `<details><summary>Volltext anzeigen</summary>${body}</details>` : body}
     ${files ? `<div class="attachments">${files}</div>` : ""}
+    ${r.rueckmeldung ? rsvpBlock(r) : ""}
     <div class="actions">
       <button class="quiet" data-edit="${esc(r.id)}">Bearbeiten</button>
       ${!["Erledigt","Bestätigt"].includes(r.status) ? `<button class="quiet" data-done="${esc(r.id)}">✓ Erledigt</button>` : ""}
       ${parent ? `<button class="quiet" data-mail="${esc(r.id)}">✉ Per E-Mail an Eltern</button><button class="quiet" data-copy="${esc(r.id)}">Text kopieren</button><a class="btnlink quiet" target="_blank" rel="noopener noreferrer" href="https://wa.me/?text=${encodeURIComponent(r.inhalt)}">Per WhatsApp teilen</a>` : ""}
     </div></article>`;
+}
+const myAnswer = r => (r.zusagen || []).find(z => z.benutzer_id === me.id)?.antwort || "";
+const rsvpButtons = r => ANSWERS.map(([a, label]) => `<button class="quiet rsvpbtn" data-rsvp="${esc(r.id)}" data-a="${a}" aria-pressed="${myAnswer(r) === a}">${label}</button>`).join("");
+function rsvpBlock(r) {
+  const z = r.zusagen || [], by = a => z.filter(x => x.antwort === a).map(x => x.name), offen = r.offen || [];
+  const ja = by("ja"), vl = by("vielleicht"), nein = by("nein");
+  const list = (label, names) => names.length ? `<li><b>${label} (${names.length}):</b> ${esc(names.join(", "))}</li>` : "";
+  return `<div class="rsvp"><div class="rsvpbtns"><span class="muted small">Deine Antwort:</span>${rsvpButtons(r)}</div>
+    <details><summary>✓ ${ja.length} Zusagen · ? ${vl.length} Vielleicht · ✗ ${nein.length} Absagen · ${offen.length} noch offen</summary>
+    <ul>${list("Nehmen teil", ja)}${list("Vielleicht", vl)}${list("Nehmen nicht teil", nein)}${list("Noch keine Antwort", offen)}</ul></details></div>`;
+}
+async function answer(id, a) {
+  const r = entries.find(x => x.id === id); if (!r) return;
+  const neu = myAnswer(r) === a ? "" : a; // nochmal klicken = Antwort zurücknehmen
+  try {
+    await api(`/api/eintraege/${id}/zusage`, { method: "PUT", data: { antwort: neu } });
+    notice(neu ? `Danke! Deine Antwort „${ANSWERS.find(x => x[0] === neu)[1].slice(2)}“ ist gespeichert.` : "Antwort zurückgenommen.", true);
+    await reload();
+  } catch (e) { notice(e.message); }
 }
 function mini(items, empty) {
   return items.length ? items.map(r => `<button class="mini" data-edit="${esc(r.id)}">${esc(r.titel)}<small>${esc([dateText(r.datum), r.zustaendig, r.status].filter(Boolean).join(" · "))}</small></button>`).join("")
@@ -216,11 +240,15 @@ function renderHome() {
   const recent = [...entries].sort((a,b) => b.geaendert.localeCompare(a.geaendert)).slice(0, 5);
   const stat = (num, label, href) => `<a class="stat" href="${href}"><strong>${num}</strong>${label}</a>`;
   const cal = IDX("Kalender") > 0 ? route(IDX("Kalender")) : "#start";
-  let extra = "";
+  const pending = entries.filter(r => r.rueckmeldung && !myAnswer(r) && (!r.datum || r.datum >= t) && r.status !== "Erledigt")
+    .sort((a,b) => (a.datum || "9999").localeCompare(b.datum || "9999"));
+  let extra = pending.length ? `<section class="card warnbox"><h2>Deine Rückmeldung fehlt (${pending.length})</h2>
+    ${pending.map(r => `<div class="rsvprow"><div><b>${esc(r.titel)}</b><small>${esc([dateText(r.datum) + (r.uhrzeit ? " · " + r.uhrzeit + " Uhr" : ""), r.ort].filter(Boolean).join(" · ") || r.bereich)}</small></div>
+      <div class="rsvpbtns">${rsvpButtons(r)}</div></div>`).join("")}</section>` : "";
   if (isVorstand()) {
     const plan = entries.filter(r => r.bereich === "Gründungsplan"), done = plan.filter(r => ["Erledigt","Bestätigt"].includes(r.status)).length;
     const pct = plan.length ? Math.round(done / plan.length * 100) : 0;
-    extra = `<section class="card"><div class="cardtop"><h2>Gründungsfortschritt</h2><a class="link" href="${route(IDX("Gründungsplan"))}">Gründungsplan</a></div>
+    extra += `<section class="card"><div class="cardtop"><h2>Gründungsfortschritt</h2><a class="link" href="${route(IDX("Gründungsplan"))}">Gründungsplan</a></div>
         <div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>
         <p class="muted">${done} von ${plan.length} Schritten erledigt (${pct} %)</p></section>
       <section class="card"><div class="cardtop"><h2>Unterlagen</h2><a class="link" href="${route(IDX("Dokumente"))}">Dokumente</a></div>
@@ -278,7 +306,10 @@ function renderCalendar() {
   const t = today(); let cells = "";
   for (let i = 0; i < 42; i++) {
     const d = new Date(start.getTime() + i * 864e5), iso = d.toISOString().slice(0,10);
-    const ev = (byDay[iso] || []).sort((a,b) => a.uhrzeit.localeCompare(b.uhrzeit)).map(r => `<button class="ev" data-s="${esc(r.status)}" data-edit="${esc(r.id)}" title="${esc(r.titel)}">${r.uhrzeit ? esc(r.uhrzeit)+" " : ""}${esc(r.titel)}</button>`).join("");
+    const ev = (byDay[iso] || []).sort((a,b) => a.uhrzeit.localeCompare(b.uhrzeit)).map(r => {
+      const lock = isVorstand() && vorstandOnly(r.bereich);
+      return `<button class="ev" data-s="${esc(r.status)}" data-edit="${esc(r.id)}" title="${esc(r.titel)}${lock ? " (nur Vorstand sichtbar)" : ""}">${lock ? "🔒 " : ""}${r.uhrzeit ? esc(r.uhrzeit)+" " : ""}${esc(r.titel)}</button>`;
+    }).join("");
     cells += `<div class="day${d.getUTCMonth() !== m-1 ? " other" : ""}${iso === t ? " today" : ""}" data-day="${iso}"><span class="num">${d.getUTCDate()}</span>${ev}</div>`;
   }
   el.innerHTML = `<div class="calhead"><button class="quiet" data-act="calPrev" aria-label="Vorheriger Monat">‹</button><h3>${label}</h3><button class="quiet" data-act="calNext" aria-label="Nächster Monat">›</button><button class="quiet" data-act="calToday">Heute</button></div>
@@ -378,7 +409,7 @@ async function renderLog() {
 function renderUsers() {
   const roleBadge = u => `<span class="rolebadge${u.rolle === "ausschuss" ? " aus" : ""}">${ROLE[u.rolle]}</span>${u.ist_admin ? ' <span class="rolebadge adm">Admin</span>' : ""}`;
   $("view").innerHTML = `<div class="sectionhead"><h2>Benutzer</h2><span class="muted small">${users.length} Konten</span></div>
-    <p class="muted" style="margin-bottom:14px;max-width:80ch"><b>Vorstand</b> sieht und bearbeitet alles. <b>Ausschuss</b> sieht und bearbeitet nur ${esc(["Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender","Mitglieder"].join(", "))} und darf nichts löschen. <b>Admin</b> verwaltet zusätzlich die Benutzer.</p>
+    <p class="muted" style="margin-bottom:14px;max-width:80ch"><b>Vorstand</b> sieht und bearbeitet alles. <b>Ausschuss</b> sieht und bearbeitet nur ${esc([...AUSSCHUSS_GROUPS, "Mitglieder"].join(", "))} und darf nichts löschen. <b>Admin</b> verwaltet zusätzlich die Benutzer.</p>
     <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Benutzername</th><th>Rolle</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead><tbody>
     ${users.map(u => `<tr><td><b>${esc(u.anzeigename)}</b></td><td>${esc(u.benutzername)}</td><td>${roleBadge(u)}</td><td class="lock">${esc(u.letzter_login ? fmtTime(u.letzter_login) : "noch nie")}</td>
       <td>${u.aktiv ? (u.pw_aendern ? '<span class="lock">wartet auf 1. Login</span>' : "aktiv") : '<span class="lock">deaktiviert</span>'}</td>
@@ -716,11 +747,22 @@ function edit(rec, preset = {}) {
   field("bereich").innerHTML = options(me.bereiche, rec?.bereich || preset.bereich || (me.bereiche.includes(cur) ? cur : me.bereiche[0]));
   field("status").innerHTML = options(STATUSES, rec?.status || preset.status || (cur === "Kalender" ? "Geplant" : "Offen"));
   for (const k of ["titel","datum","uhrzeit","ort","zustaendig","inhalt","quelle"]) field(k).value = rec?.[k] ?? preset[k] ?? "";
+  field("rueckmeldung").checked = rec ? !!rec.rueckmeldung : preset.rueckmeldung !== undefined ? !!preset.rueckmeldung : field("bereich").value === "Kalender";
+  updateVisHint();
   $("formMeta").textContent = rec ? `Zuletzt geändert ${fmtTime(rec.geaendert)} von ${rec.geaendert_von}` : "";
   field("datei").value = ""; pendingSheet = null; $("importBox").hidden = true; $("importBox").innerHTML = "";
   renderAttachList(rec);
   editor.showModal(); field("titel").focus();
 }
+function updateVisHint() {
+  const h = $("visHint"), b = field("bereich").value;
+  if (!isVorstand()) { h.textContent = ""; return; }
+  h.className = "vishint" + (vorstandOnly(b) ? " vorstand" : "");
+  h.textContent = vorstandOnly(b)
+    ? `🔒 Nur der Vorstand sieht diesen Eintrag. Soll der Ausschuss ihn auch sehen, wähle z. B. den Bereich „Kalender“.`
+    : `👥 Vorstand und Ausschuss sehen diesen Eintrag.`;
+}
+field("bereich").addEventListener("change", updateVisHint);
 function renderAttachList(rec) {
   $("attachList").innerHTML = (rec?.anhaenge || []).map(a => `<span><button type="button" class="quiet chip" data-att="${esc(a.id)}">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>${me.darf_loeschen ? `<button type="button" class="quiet danger chip" data-attdel="${esc(a.id)}" aria-label="${esc(a.dateiname)} löschen">✕</button>` : ""}</span>`).join("");
 }
@@ -781,6 +823,7 @@ async function deleteAttachment(id) {
 form.onsubmit = async e => {
   e.preventDefault();
   const v = Object.fromEntries(FIELDS.map(k => [k, String(field(k).value || "").trim()]));
+  v.rueckmeldung = field("rueckmeldung").checked;
   const file = field("datei").files[0];
   $("save").disabled = true; $("error").textContent = "";
   try {
@@ -1009,6 +1052,7 @@ document.addEventListener("click", async e => {
   if (ds.memberedit) return editMember(ds.memberedit);
   if (ds.parentedit) return editParent(ds.parentedit);
   if (ds.mail) return openMail(ds.mail);
+  if (ds.rsvp) return answer(ds.rsvp, ds.a);
   switch (ds.act) {
     case "importPeople": return pickPeopleFile(ds.kind);
     case "membersCsv": return exportMembersCsv();

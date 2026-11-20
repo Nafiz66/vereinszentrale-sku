@@ -88,6 +88,9 @@ Als Admin anmelden → **Benutzer** → **＋ Benutzer** → Rolle wählen. Die 
 - **Mitglieder:** Von Hand mit *＋ Mitglied* oder als ganze Liste mit *CSV/Excel-Datei hochladen*. Erkannte Spalten: Vorname, Nachname (oder „Name“), Geburtsdatum, Mannschaft, E-Mail, Telefon, Mitglied seit, Status, Notiz. Wer schon in der Liste steht (gleicher Name + Geburtsdatum), wird nicht doppelt angelegt.
 - **Elternkommunikation → Eltern-Verteiler:** Eltern mit E-Mail-Adresse eintragen oder importieren. Auf jeder Nachricht gibt es den Knopf *✉ Per E-Mail an Eltern*. Damit öffnet sich dein E-Mail-Programm mit Betreff, Text und allen Eltern (oder nur einer Mannschaft) im **BCC**. Bei sehr vielen Adressen werden sie in die Zwischenablage kopiert und du fügst sie selbst bei BCC ein.
 
+- **Wer sieht was?** Im Eintrag-Fenster steht, ob nur der Vorstand (🔒) oder auch der Ausschuss (👥) den Eintrag sieht. Termine für alle gehören in den Bereich **Kalender**. Achtung: Der Bereich „Vorstand & Ausschuss“ ist trotz seines Namens **nur für den Vorstand** sichtbar.
+- **Zu- und Absagen:** Mit dem Häkchen *Rückmeldung erwünscht* bekommt ein Eintrag die Knöpfe *✓ Ich nehme teil / ? Vielleicht / ✗ Leider nicht*. Im aufklappbaren Bereich darunter steht, wer zugesagt hat und wer noch nicht geantwortet hat. Offene Antworten erscheinen auf der **Übersicht** unter *Deine Rückmeldung fehlt*. Ein zweiter Klick auf die eigene Antwort nimmt sie zurück.
+
 **Datenschutz:** Mitglieder- und Elterndaten sind personenbezogen. Nur eintragen, was der Verein braucht. Ausgetretene Mitglieder auf Status *Ausgetreten* setzen oder löschen (lassen).
 
 ---

@@ -19,7 +19,8 @@ const SERVER_ITER = 10000;
 const SESSION_HOURS = 12, SESSION_HOURS_LONG = 24 * 30;
 const MAX_FAILS = 5, LOCK_MINUTES = 15;
 const MAX_FILE = 10 * 1024 * 1024, CHUNK = 1024 * 1024;
-const ENTRY_FIELDS = ["titel","bereich","status","datum","uhrzeit","ort","zustaendig","inhalt","quelle"];
+const ENTRY_FIELDS = ["titel","bereich","status","datum","uhrzeit","ort","zustaendig","inhalt","quelle","rueckmeldung"];
+const ANSWERS = { ja: "Nimmt teil", vielleicht: "Vielleicht", nein: "Nimmt nicht teil" };
 const LIMITS = { titel: 160, ort: 120, zustaendig: 120, inhalt: 60000, quelle: 200 };
 const MAX_IMPORT = 1000;
 const MEMBER_FIELDS = ["vorname","nachname","geburtsdatum","mannschaft","email","telefon","eintritt","status","notiz"];
@@ -199,18 +200,45 @@ async function changeOwnPassword(req, env, u) {
 async function listEntries(env, u) {
   const groups = isVorstand(u) ? GROUPS : AUSSCHUSS_GROUPS;
   const ph = groups.map(() => "?").join(",");
-  const [e, a] = await env.DB.batch([
+  const [e, a, z, b] = await env.DB.batch([
     env.DB.prepare(`SELECT * FROM eintraege WHERE bereich IN (${ph}) ORDER BY datum, uhrzeit, titel`).bind(...groups),
     env.DB.prepare(`SELECT a.id, a.eintrag_id, a.dateiname, a.mime, a.groesse, a.erstellt, a.erstellt_von FROM anhaenge a
       JOIN eintraege e ON e.id=a.eintrag_id WHERE e.bereich IN (${ph}) ORDER BY a.erstellt`).bind(...groups),
+    env.DB.prepare(`SELECT z.eintrag_id, z.benutzer_id, z.antwort, z.geaendert, b.anzeigename FROM zusagen z
+      JOIN eintraege e ON e.id=z.eintrag_id JOIN benutzer b ON b.id=z.benutzer_id WHERE e.bereich IN (${ph}) ORDER BY b.anzeigename`).bind(...groups),
+    env.DB.prepare("SELECT id, anzeigename, rolle FROM benutzer WHERE aktiv=1 ORDER BY anzeigename"),
   ]);
-  const byEntry = {};
-  for (const x of a.results) (byEntry[x.eintrag_id] ||= []).push(x);
-  return { eintraege: e.results.map(r => ({ ...r, anhaenge: byEntry[r.id] || [] })) };
+  const files = {}, answers = {};
+  for (const x of a.results) (files[x.eintrag_id] ||= []).push(x);
+  for (const x of z.results) (answers[x.eintrag_id] ||= []).push({ benutzer_id: x.benutzer_id, name: x.anzeigename, antwort: x.antwort, geaendert: x.geaendert });
+  return { eintraege: e.results.map(r => {
+    const out = { ...r, anhaenge: files[r.id] || [] };
+    if (r.rueckmeldung) {
+      out.zusagen = answers[r.id] || [];
+      const done = new Set(out.zusagen.map(x => x.benutzer_id));
+      // Wer den Eintrag sehen kann und noch nicht geantwortet hat
+      out.offen = b.results.filter(x => !done.has(x.id) && canSeeGroup(x, r.bereich)).map(x => x.anzeigename);
+    }
+    return out;
+  }) };
+}
+async function answerEntry(req, env, u, id) {
+  const b = await body(req);
+  const e = await visibleEntry(env, u, id);
+  const full = await env.DB.prepare("SELECT rueckmeldung FROM eintraege WHERE id=?").bind(id).first();
+  if (!full.rueckmeldung) fail(400, "Für diesen Eintrag ist keine Rückmeldung vorgesehen.");
+  const antwort = String(b.antwort ?? "");
+  if (antwort && !ANSWERS[antwort]) fail(400, "Ungültige Antwort.");
+  if (antwort) await env.DB.prepare(`INSERT INTO zusagen(eintrag_id,benutzer_id,antwort,geaendert) VALUES(?,?,?,?)
+      ON CONFLICT(eintrag_id,benutzer_id) DO UPDATE SET antwort=excluded.antwort, geaendert=excluded.geaendert`).bind(id, u.id, antwort, nowIso()).run();
+  else await env.DB.prepare("DELETE FROM zusagen WHERE eintrag_id=? AND benutzer_id=?").bind(id, u.id).run();
+  await log(env, u, "Rückmeldung", e.titel, antwort ? ANSWERS[antwort] : "Antwort zurückgenommen");
+  return { ok: true };
 }
 function readEntry(b, u) {
   const v = {};
   for (const k of ENTRY_FIELDS) v[k] = clean(b[k], LIMITS[k] || 40);
+  v.rueckmeldung = b.rueckmeldung === true || b.rueckmeldung === 1 || b.rueckmeldung === "1" ? 1 : 0;
   if (!v.titel) fail(400, "Bitte einen Titel eingeben.");
   if (!GROUPS.includes(v.bereich)) fail(400, "Unbekannter Bereich.");
   if (!STATUSES.includes(v.status)) fail(400, "Unbekannter Status.");
@@ -231,12 +259,12 @@ async function updateEntry(req, env, u, id) {
   if (!old || !canSeeGroup(u, old.bereich)) fail(404, "Eintrag nicht gefunden.");
   if (b.geaendert && b.geaendert !== old.geaendert) fail(409, "Jemand anderes hat diesen Eintrag inzwischen geändert. Bitte neu laden.");
   const v = readEntry(b, u);
-  const changed = ENTRY_FIELDS.filter(k => (old[k] ?? "") !== v[k]);
+  const changed = ENTRY_FIELDS.filter(k => String(old[k] ?? "") !== String(v[k]));
   if (!changed.length) return { eintrag: old };
   const t = nowIso();
   await env.DB.prepare(`UPDATE eintraege SET ${ENTRY_FIELDS.map(k => k + "=?").join(",")}, geaendert=?, geaendert_von=? WHERE id=?`)
     .bind(...ENTRY_FIELDS.map(k => v[k]), t, u.anzeigename, id).run();
-  await log(env, u, "Geändert", v.titel, changed.map(k => k === "inhalt" ? "Inhalt bearbeitet" : `${k}: „${old[k] || "–"}“ → „${v[k] || "–"}“`).join("\n"));
+  await log(env, u, "Geändert", v.titel, changed.map(k => k === "inhalt" ? "Inhalt bearbeitet" : k === "rueckmeldung" ? `Rückmeldung erwünscht: ${v[k] ? "ja" : "nein"}` : `${k}: „${old[k] || "–"}“ → „${v[k] || "–"}“`).join("\n"));
   return { eintrag: await env.DB.prepare("SELECT * FROM eintraege WHERE id=?").bind(id).first() };
 }
 async function deleteEntry(env, u, id) {
@@ -246,6 +274,7 @@ async function deleteEntry(env, u, id) {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM anhang_teile WHERE anhang_id IN (SELECT id FROM anhaenge WHERE eintrag_id=?)").bind(id),
     env.DB.prepare("DELETE FROM anhaenge WHERE eintrag_id=?").bind(id),
+    env.DB.prepare("DELETE FROM zusagen WHERE eintrag_id=?").bind(id),
     env.DB.prepare("DELETE FROM eintraege WHERE id=?").bind(id),
   ]);
   await log(env, u, "Gelöscht", old.titel);
@@ -504,7 +533,7 @@ async function deleteUser(env, u, id) {
   const t = await env.DB.prepare("SELECT * FROM benutzer WHERE id=?").bind(id).first();
   if (!t) fail(404, "Benutzer nicht gefunden.");
   if (t.ist_admin && t.aktiv && (await adminCount(env)) <= 1) fail(400, "Mindestens ein aktiver Admin muss bleiben.");
-  await env.DB.batch([env.DB.prepare("DELETE FROM sitzungen WHERE benutzer_id=?").bind(id), env.DB.prepare("DELETE FROM benutzer WHERE id=?").bind(id)]);
+  await env.DB.batch([env.DB.prepare("DELETE FROM sitzungen WHERE benutzer_id=?").bind(id), env.DB.prepare("DELETE FROM zusagen WHERE benutzer_id=?").bind(id), env.DB.prepare("DELETE FROM benutzer WHERE id=?").bind(id)]);
   await log(env, u, "Benutzer gelöscht", t.anzeigename);
   return listUsers(env);
 }
@@ -521,8 +550,9 @@ async function exportAll(env) {
   const mg = await env.DB.prepare("SELECT * FROM mitglieder ORDER BY nachname, vorname").all();
   const el = await env.DB.prepare("SELECT * FROM eltern ORDER BY mannschaft, name").all();
   const an = await env.DB.prepare("SELECT id, eintrag_id, dateiname, mime, groesse, erstellt, erstellt_von FROM anhaenge").all();
+  const zs = await env.DB.prepare("SELECT z.eintrag_id, b.anzeigename, z.antwort, z.geaendert FROM zusagen z JOIN benutzer b ON b.id=z.benutzer_id").all();
   return { format: "sku-vereinszentrale", exportiert: nowIso(), eintraege: e.results, dokumente: d.results, protokoll: p.results,
-    mitglieder: mg.results, eltern: el.results, anhaenge: an.results };
+    mitglieder: mg.results, eltern: el.results, anhaenge: an.results, zusagen: zs.results };
 }
 
 /* ---------------- Router ---------------- */
@@ -551,6 +581,7 @@ async function route(req, env, cors) {
     if (M === "PUT") return json(await updateEntry(req, env, u, m[1]), 200, cors);
     if (M === "DELETE") return json(await deleteEntry(env, u, m[1]), 200, cors);
   }
+  if ((m = p.match(/^\/api\/eintraege\/([\w-]+)\/zusage$/)) && M === "PUT") return json(await answerEntry(req, env, u, m[1]), 200, cors);
   if ((m = p.match(/^\/api\/eintraege\/([\w-]+)\/anhaenge$/)) && M === "POST") return json(await addAttachment(req, env, u, m[1]), 200, cors);
   if ((m = p.match(/^\/api\/anhaenge\/([\w-]+)$/))) {
     if (M === "GET") return downloadAttachment(env, u, m[1], cors);
