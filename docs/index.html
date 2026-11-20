@@ -11,8 +11,8 @@
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta http-equiv="Cache-Control" content="no-cache">
-<link rel="stylesheet" href="style.css?v=3">
-<script src="config.js?v=3"></script>
+<link rel="stylesheet" href="style.css?v=4">
+<script src="config.js?v=4"></script>
 </head>
 <body>
 
@@ -243,9 +243,78 @@
   </form>
 </dialog>
 
+<!-- Download -->
+<dialog id="dlEditor">
+  <form id="dlForm">
+    <h2 id="dlFormTitle">Download</h2>
+    <label>Titel<input name="titel" required maxlength="160" placeholder="z. B. Sponsoring-Mappe 2027"></label>
+    <label>Kategorie<select name="kategorie"></select></label>
+    <label>Beschreibung<textarea name="beschreibung" rows="3" maxlength="2000" placeholder="Wofür ist die Datei? z. B. „Logo als Vektordatei für Druckereien“"></textarea></label>
+    <label>Datei (max. 10 MB)<input name="datei" type="file"></label>
+    <p class="muted small" id="dlFileInfo"></p>
+    <div id="dlError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" id="dlRemove" class="quiet danger">Löschen</button>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button id="dlSave">Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Vereinsdaten / Rechnungs-Vorlage -->
+<dialog id="settingsEditor">
+  <form id="settingsForm">
+    <h2>Vereinsdaten &amp; Rechnungs-Vorlage</h2>
+    <p class="muted small">Diese Angaben werden für <b>neue</b> Rechnungen und den Mitgliedsantrag vorausgefüllt. In jeder Rechnung kannst du sie noch einzeln ändern. Fest bleiben nur Vereinsname, Logo und Rechnungsnummer.</p>
+    <label>Anschrift des Vereins<textarea name="adresse" rows="2" maxlength="300"></textarea></label>
+    <div class="fields">
+      <label>Telefon<input name="telefon" maxlength="60"></label>
+      <label>E-Mail<input name="email" type="email" maxlength="160"></label>
+      <label>Webseite<input name="web" maxlength="160"></label>
+      <label>Vertreten durch (Vorstand)<input name="vorsitz" maxlength="200" placeholder="z. B. Max Muster (1. Vorsitzender)"></label>
+      <label>Vereinsregister<input name="register" maxlength="160" placeholder="z. B. VR 12345, Amtsgericht Mannheim"></label>
+      <label>Steuernummer<input name="steuernummer" maxlength="60"></label>
+      <label>USt-IdNr. (falls vorhanden)<input name="ustid" maxlength="40"></label>
+      <label>Gläubiger-ID (SEPA-Lastschrift)<input name="glaeubiger_id" maxlength="40"></label>
+      <label>Bank<input name="bank" maxlength="120"></label>
+      <label>IBAN<input name="iban" maxlength="42"></label>
+      <label>BIC<input name="bic" maxlength="20"></label>
+      <label>Rechnungsersteller / Ansprechpartner<input name="ersteller" maxlength="120"></label>
+      <label>Standard-MwSt. in %<input name="mwst" inputmode="decimal" maxlength="6"></label>
+      <label>Zahlungsziel in Tagen<input name="zahlungsziel" inputmode="numeric" maxlength="4"></label>
+    </div>
+    <label>Einleitungstext der Rechnung<textarea name="einleitung" rows="2" maxlength="2000"></textarea></label>
+    <label>Schlusstext der Rechnung<textarea name="schlusstext" rows="4" maxlength="4000"></textarea></label>
+    <p class="muted small">Platzhalter: <code>{nummer}</code> Rechnungsnummer · <code>{faellig}</code> Fälligkeitsdatum · <code>{betrag}</code> Gesamtbetrag · <code>{ersteller}</code> Ersteller. Kein Umsatzsteuer-Ausweis? Dann MwSt. 0 % wählen und z. B. „Gemäß § 19 UStG wird keine Umsatzsteuer berechnet.“ in den Schlusstext schreiben (mit dem Steuerberater klären).</p>
+    <label>Zusätzliche Fußzeile<textarea name="fusszeile" rows="2" maxlength="1000"></textarea></label>
+    <label>Beitragstext für den Mitgliedsantrag<textarea name="beitrag_text" rows="2" maxlength="2000" placeholder="z. B. Kinder und Jugendliche: 10 € im Monat · Erwachsene: 15 € im Monat"></textarea></label>
+    <p class="muted small" id="settingsMeta"></p>
+    <div id="settingsError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button>Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Rechnung ansehen -->
+<dialog id="invoiceView" class="wide">
+  <div id="invoiceViewBody"></div>
+  <div id="invoiceError" class="err" role="alert"></div>
+  <footer>
+    <button type="button" class="quiet danger" id="invStorno">Stornieren</button>
+    <button type="button" class="quiet" id="invPaid">Als bezahlt markieren</button>
+    <button type="button" class="quiet" id="invOpen">Wieder auf offen</button>
+    <button type="button" class="quiet" id="invEdit">Bearbeiten</button>
+    <button type="button" class="quiet" data-close>Schließen</button>
+    <button type="button" id="invPrint" autofocus>Drucken / als PDF speichern</button>
+  </footer>
+</dialog>
+
 <datalist id="teamList"></datalist>
 <input id="peopleFile" type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm,.xls" hidden>
 <input id="importJson" type="file" accept=".json,application/json" hidden>
-<script src="app.js?v=3"></script>
+<div id="printArea"></div>
+<script src="app.js?v=4"></script>
 </body>
 </html>

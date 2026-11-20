@@ -198,4 +198,67 @@ label.check input{width:auto}
 .rsvprow:last-child{border-bottom:0}
 .rsvprow small{display:block;color:var(--muted)}
 
+/* ---- Downloads ---- */
+.dlgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.dlgrid .card{margin:0;display:flex;flex-direction:column}
+.dlgrid .card .actions{margin-top:auto;padding-top:10px}
+.dlcat{margin:24px 0 10px;font-size:17px}
+.hintcard{border-style:dashed;background:transparent}
+code{background:#262832;border-radius:4px;padding:0 4px;font-size:.92em}
+
+/* ---- Rechnungen ---- */
+dialog.wide{width:min(980px,calc(100% - 24px))}
+.money{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.overdue{color:#ffacb2}
+.invform .postable input{padding:6px 7px}
+.invform .postable td{padding:5px 4px;vertical-align:top}
+.invform .postable td:first-child{min-width:220px}
+.invform .postable .num{width:90px}
+.invform .postable .small{width:64px}
+.invtotals{display:grid;grid-template-columns:auto auto;justify-content:end;gap:3px 18px;margin:12px 4px;font-variant-numeric:tabular-nums}
+.invtotals .grand{font-weight:800;font-size:17px;border-top:1px solid var(--line);padding-top:4px}
+.previewwrap{background:#0e0f13;border:1px solid var(--line);border-radius:11px;padding:16px;overflow:auto;margin-top:16px}
+.badge[data-s="Bezahlt"]{background:#203e35;color:var(--ok)}
+.badge[data-s="Storniert"]{background:#343842;color:#9aa0ab;text-decoration:line-through}
+
+/* Rechnungs-/Formular-Papier (Bildschirm-Vorschau und Druck) */
+.paper{position:relative;background:#fff;color:#16171c;font:12.5px/1.45 "Segoe UI",Arial,sans-serif;width:100%;max-width:210mm;margin:auto;padding:14mm 16mm 12mm;box-shadow:0 8px 30px #0008;overflow:hidden}
+.paper h1{font-size:22px;letter-spacing:0;margin:18px 0 4px;color:#16171c}
+.paper table{width:100%;border-collapse:collapse}
+.paper th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#666;border-bottom:1.5px solid #16171c;padding:6px 5px;text-align:left}
+.paper td{border-bottom:1px solid #ddd;padding:6px 5px;vertical-align:top}
+.paper .r{text-align:right;white-space:nowrap}
+.p-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;border-bottom:3px solid #c8202f;padding-bottom:10px}
+.p-club{font-size:20px;font-weight:800;letter-spacing:.02em;color:#16171c}
+.p-sub{color:#c8202f;font-weight:700;font-size:11px;letter-spacing:.18em}
+.p-logo{width:30mm;height:30mm;border-radius:6px;object-fit:cover}
+.p-row{display:flex;justify-content:space-between;gap:24px;margin-top:10mm}
+.p-sender{font-size:9.5px;color:#666;border-bottom:1px solid #ccc;padding-bottom:2px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:85mm}
+.p-to{white-space:pre-line;font-size:13px;min-height:28mm;max-width:85mm}
+.p-meta{display:grid;grid-template-columns:auto auto;gap:2px 12px;font-size:12px;align-content:start}
+.p-meta dt{color:#666}.p-meta dd{margin:0;font-weight:600;text-align:right}
+.p-text{white-space:pre-line;margin:8px 0}
+.p-totals{width:auto!important;margin:8px 0 0 auto}
+.p-totals td{border:0;padding:2px 5px}
+.p-totals .grand td{font-weight:800;font-size:14px;border-top:1.5px solid #16171c;padding-top:5px}
+.p-foot{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:9.5px;color:#555;border-top:1px solid #ccc;padding-top:8px;margin-top:14mm;white-space:pre-line}
+.p-stamp{position:absolute;top:42%;left:50%;transform:translate(-50%,-50%) rotate(-24deg);font-size:72px;font-weight:900;color:#c8202f33;border:6px solid #c8202f33;padding:4px 24px;letter-spacing:.1em;pointer-events:none}
+.p-field{border-bottom:1px solid #999;min-height:24px;padding:8px 0 2px;font-size:10px;color:#777}
+.p-fields{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
+.p-box{border:1px solid #bbb;border-radius:4px;padding:8px 10px;margin-top:10px}
+.p-box h3{font-size:12.5px;margin:0 0 4px}
+.p-check{display:flex;gap:8px;align-items:flex-start;margin:4px 0}
+.p-check::before{content:"";flex:none;width:11px;height:11px;border:1px solid #333;margin-top:2px}
+.p-sign{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:22px}
+.p-sign div{border-top:1px solid #333;padding-top:3px;font-size:10px;color:#555}
+
+#printArea{display:none}
+@media print{
+  @page{size:A4;margin:0}
+  body.printmode{background:#fff}
+  body.printmode>*:not(#printArea){display:none!important}
+  body.printmode #printArea{display:block!important}
+  body.printmode .paper{box-shadow:none;max-width:none;width:210mm;min-height:297mm;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+
 @media(max-width:780px){.userbox{display:flex;align-items:center;gap:8px;margin:0}.userbox span{display:none}.userbox button{margin:0 0 0 auto}.sidefoot{font-size:0}}

@@ -29,6 +29,14 @@ const MEMBER_STATUSES = ["Aktiv","Passiv","Ausgetreten"];
 const PARENT_FIELDS = ["name","email","kind","mannschaft","notiz"];
 const PARENT_LIMITS = { name: 120, email: 160, kind: 120, mannschaft: 80, notiz: 1000 };
 const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
+const DL_CATS = ["Formulare","Sponsoren","Logos & Werbematerial","Sonstiges"];
+// Vereinsdaten (Absender auf Rechnungen und Formularen) – alles frei änderbar außer Vereinsname, Logo, Rechnungsnummer
+const VEREIN_FIELDS = { adresse: 300, telefon: 60, email: 160, web: 160, vorsitz: 200, register: 160, steuernummer: 60, ustid: 40,
+  bank: 120, iban: 42, bic: 20, glaeubiger_id: 40, ersteller: 120, mwst: 6, zahlungsziel: 4, einleitung: 2000, schlusstext: 4000, fusszeile: 1000, beitrag_text: 2000 };
+const VEREIN_DEFAULTS = { adresse: "Bahnhofstraße 37\n75417 Mühlacker", mwst: "19", zahlungsziel: "14",
+  einleitung: "Vielen Dank für Ihre Unterstützung. Wir stellen Ihnen folgende Leistungen in Rechnung:",
+  schlusstext: "Bitte überweisen Sie den Rechnungsbetrag bis zum {faellig} unter Angabe der Rechnungsnummer {nummer} auf das unten genannte Konto.\n\nMit sportlichen Grüßen\n{ersteller}" };
+const INVOICE_STATUSES = ["Offen","Bezahlt","Storniert"];
 
 class HttpError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const fail = (status, message) => { throw new HttpError(status, message); };
@@ -481,6 +489,148 @@ async function deleteDoc(env, u, id) {
   return { ok: true };
 }
 
+/* ---- Downloads (Vorstand + Ausschuss; löschen nur Vorstand) ---- */
+async function listDownloads(env) {
+  const { results } = await env.DB.prepare("SELECT * FROM downloads ORDER BY kategorie, titel").all();
+  return { downloads: results };
+}
+async function saveDownload(req, env, u, id) {
+  const b = await body(req), t = nowIso();
+  const v = { titel: clean(b.titel, 160), kategorie: clean(b.kategorie, 60), beschreibung: clean(b.beschreibung, 2000) };
+  if (!v.titel) fail(400, "Bitte einen Titel eingeben.");
+  if (!DL_CATS.includes(v.kategorie)) fail(400, "Unbekannte Kategorie.");
+  if (id) {
+    const r = await env.DB.prepare("UPDATE downloads SET titel=?, kategorie=?, beschreibung=?, geaendert=?, geaendert_von=? WHERE id=?").bind(v.titel, v.kategorie, v.beschreibung, t, u.anzeigename, id).run();
+    if (!r.meta.changes) fail(404, "Download nicht gefunden.");
+  } else {
+    id = uid();
+    await env.DB.prepare("INSERT INTO downloads(id,titel,kategorie,beschreibung,erstellt,geaendert,geaendert_von) VALUES(?,?,?,?,?,?,?)").bind(id, v.titel, v.kategorie, v.beschreibung, t, t, u.anzeigename).run();
+  }
+  await log(env, u, "Download gespeichert", v.titel, v.kategorie);
+  return { download: await env.DB.prepare("SELECT * FROM downloads WHERE id=?").bind(id).first() };
+}
+async function uploadDownload(req, env, u, id) {
+  const d = await env.DB.prepare("SELECT titel FROM downloads WHERE id=?").bind(id).first();
+  if (!d) fail(404, "Download nicht gefunden.");
+  const { buf, name, mime } = await readUpload(req);
+  const stmts = [env.DB.prepare("DELETE FROM download_teile WHERE download_id=?").bind(id)];
+  for (let i = 0, nr = 0; i < buf.length; i += CHUNK, nr++)
+    stmts.push(env.DB.prepare("INSERT INTO download_teile(download_id,nr,daten) VALUES(?,?,?)").bind(id, nr, buf.slice(i, i + CHUNK)));
+  stmts.push(env.DB.prepare("UPDATE downloads SET dateiname=?, mime=?, groesse=?, geaendert=?, geaendert_von=? WHERE id=?").bind(name, mime, buf.length, nowIso(), u.anzeigename, id));
+  await env.DB.batch(stmts);
+  await log(env, u, "Datei hochgeladen", "Download: " + d.titel, name);
+  return { ok: true };
+}
+async function getDownload(env, id, cors) {
+  const d = await env.DB.prepare("SELECT dateiname, mime, groesse FROM downloads WHERE id=?").bind(id).first();
+  if (!d || !d.groesse) fail(404, "Keine Datei hinterlegt.");
+  const { results } = await env.DB.prepare("SELECT daten FROM download_teile WHERE download_id=? ORDER BY nr").bind(id).all();
+  const out = new Uint8Array(d.groesse); let o = 0;
+  for (const r of results) { const part = new Uint8Array(r.daten); out.set(part, o); o += part.length; }
+  return new Response(out, { headers: { "Content-Type": d.mime || "application/octet-stream",
+    "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(d.dateiname)}`, ...SECURITY, ...cors } });
+}
+async function deleteDownload(env, u, id) {
+  needVorstand(u);
+  const d = await env.DB.prepare("SELECT titel FROM downloads WHERE id=?").bind(id).first();
+  if (!d) fail(404, "Download nicht gefunden.");
+  await env.DB.batch([env.DB.prepare("DELETE FROM download_teile WHERE download_id=?").bind(id), env.DB.prepare("DELETE FROM downloads WHERE id=?").bind(id)]);
+  await log(env, u, "Gelöscht", "Download: " + d.titel);
+  return { ok: true };
+}
+
+/* ---- Vereinsdaten / Rechnungs-Vorlage ---- */
+function readVerein(b) {
+  const v = {};
+  for (const [k, max] of Object.entries(VEREIN_FIELDS)) v[k] = clean(b?.[k], max);
+  if (v.mwst && !(Number(v.mwst.replace(",", ".")) >= 0 && Number(v.mwst.replace(",", ".")) <= 100)) fail(400, "MwSt-Satz muss zwischen 0 und 100 liegen.");
+  if (v.zahlungsziel && !/^\d{1,3}$/.test(v.zahlungsziel)) fail(400, "Zahlungsziel: Anzahl Tage (z. B. 14).");
+  if (v.email && !EMAIL_RE.test(v.email)) fail(400, "E-Mail-Adresse des Vereins ungültig.");
+  return v;
+}
+async function getSettings(env) {
+  const row = await env.DB.prepare("SELECT wert, geaendert, geaendert_von FROM einstellungen WHERE schluessel='verein'").first();
+  let v = {}; try { v = row ? JSON.parse(row.wert) : {}; } catch {}
+  return { verein: { ...VEREIN_DEFAULTS, ...v }, geaendert: row?.geaendert || "", geaendert_von: row?.geaendert_von || "" };
+}
+async function saveSettings(req, env, u) {
+  const v = readVerein(await body(req)), t = nowIso();
+  await env.DB.prepare(`INSERT INTO einstellungen(schluessel,wert,geaendert,geaendert_von) VALUES('verein',?,?,?)
+    ON CONFLICT(schluessel) DO UPDATE SET wert=excluded.wert, geaendert=excluded.geaendert, geaendert_von=excluded.geaendert_von`).bind(JSON.stringify(v), t, u.anzeigename).run();
+  await log(env, u, "Vereinsdaten geändert", "Rechnungs-Vorlage");
+  return getSettings(env);
+}
+
+/* ---- Rechnungen (Vorstand + Ausschuss; stornieren nur Vorstand; nie löschen) ---- */
+function readInvoice(b) {
+  const v = { datum: clean(b.datum, 10), leistungsdatum: clean(b.leistungsdatum, 10), faellig: clean(b.faellig, 10),
+    empfaenger: clean(b.empfaenger, 600), betreff: clean(b.betreff, 200), einleitung: clean(b.einleitung, 4000), schlusstext: clean(b.schlusstext, 4000) };
+  if (!v.datum || !validDate(v.datum)) fail(400, "Bitte ein gültiges Rechnungsdatum angeben.");
+  if (!validDate(v.leistungsdatum) || !validDate(v.faellig)) fail(400, "Leistungsdatum oder Fälligkeit ungültig.");
+  if (!v.empfaenger) fail(400, "Bitte den Rechnungsempfänger (Name und Anschrift) eingeben.");
+  if (!Array.isArray(b.positionen) || !b.positionen.length) fail(400, "Bitte mindestens eine Position eingeben.");
+  if (b.positionen.length > 100) fail(400, "Höchstens 100 Positionen.");
+  const pos = b.positionen.map((p, i) => {
+    const x = { beschreibung: clean(p?.beschreibung, 1000), menge: Math.round(Number(p?.menge) * 1000) / 1000, einheit: clean(p?.einheit, 20),
+      preis: Math.round(Number(p?.preis)), mwst: Math.round(Number(p?.mwst) * 100) / 100 };
+    if (!x.beschreibung) fail(400, `Position ${i + 1}: Bitte eine Beschreibung eingeben.`);
+    if (!Number.isFinite(x.menge) || Math.abs(x.menge) > 1e6) fail(400, `Position ${i + 1}: Menge ungültig.`);
+    if (!Number.isFinite(x.preis) || Math.abs(x.preis) > 1e9) fail(400, `Position ${i + 1}: Preis ungültig.`);
+    if (!Number.isFinite(x.mwst) || x.mwst < 0 || x.mwst > 100) fail(400, `Position ${i + 1}: MwSt-Satz muss zwischen 0 und 100 liegen.`);
+    return x;
+  });
+  // Summen: Netto je Position gerundet, Steuer je Steuersatz gerundet
+  const byRate = {};
+  for (const p of pos) byRate[p.mwst] = (byRate[p.mwst] || 0) + Math.round(p.menge * p.preis);
+  v.netto = Object.values(byRate).reduce((a, n) => a + n, 0);
+  v.steuer = Object.entries(byRate).reduce((a, [r, n]) => a + Math.round(n * Number(r) / 100), 0);
+  v.brutto = v.netto + v.steuer;
+  v.positionen = JSON.stringify(pos);
+  v.absender = JSON.stringify(readVerein(b.absender || {}));
+  return v;
+}
+const INV_COLS = ["datum","leistungsdatum","faellig","empfaenger","betreff","einleitung","positionen","schlusstext","absender","netto","steuer","brutto"];
+async function listInvoices(env) {
+  const { results } = await env.DB.prepare("SELECT * FROM rechnungen ORDER BY jahr DESC, lfd DESC").all();
+  return { rechnungen: results };
+}
+async function createInvoice(req, env, u) {
+  // Jahr als Text binden: JS-Zahlen würden als Kommazahl (2026.0) in der Nummer landen
+  const v = readInvoice(await body(req)), t = nowIso(), id = uid(), jahr = v.datum.slice(0, 4);
+  // Nummer in derselben Abfrage vergeben: fortlaufend, ohne Lücke, nie doppelt (UNIQUE)
+  const vals = INV_COLS.map(k => v[k]);
+  await env.DB.prepare(`INSERT INTO rechnungen(id,jahr,lfd,nummer,${INV_COLS.join(",")},status,erstellt,erstellt_von,geaendert,geaendert_von)
+    SELECT ?1, ?2, n, 'SKU-' || ?2 || '-' || printf('%04d', n), ${INV_COLS.map((_, i) => "?" + (i + 3)).join(",")}, 'Offen', ?${INV_COLS.length + 3}, ?${INV_COLS.length + 4}, ?${INV_COLS.length + 3}, ?${INV_COLS.length + 4}
+    FROM (SELECT COALESCE(MAX(lfd), 0) + 1 AS n FROM rechnungen WHERE jahr = ?2)`).bind(id, jahr, ...vals, t, u.anzeigename).run();
+  const r = await env.DB.prepare("SELECT * FROM rechnungen WHERE id=?").bind(id).first();
+  await log(env, u, "Rechnung erstellt", r.nummer, `${v.empfaenger.split("\n")[0]} · ${(v.brutto / 100).toFixed(2).replace(".", ",")} €`);
+  return { rechnung: r };
+}
+async function updateInvoice(req, env, u, id) {
+  const b = await body(req);
+  const old = await env.DB.prepare("SELECT * FROM rechnungen WHERE id=?").bind(id).first();
+  if (!old) fail(404, "Rechnung nicht gefunden.");
+  if (old.status === "Storniert") fail(409, "Stornierte Rechnungen können nicht mehr geändert werden.");
+  if (b.geaendert && b.geaendert !== old.geaendert) fail(409, "Jemand anderes hat diese Rechnung inzwischen geändert. Bitte neu laden.");
+  const v = readInvoice(b), t = nowIso();
+  await env.DB.prepare(`UPDATE rechnungen SET ${INV_COLS.map(k => k + "=?").join(",")}, geaendert=?, geaendert_von=? WHERE id=?`).bind(...INV_COLS.map(k => v[k]), t, u.anzeigename, id).run();
+  await log(env, u, "Rechnung geändert", old.nummer, `${(old.brutto / 100).toFixed(2).replace(".", ",")} € → ${(v.brutto / 100).toFixed(2).replace(".", ",")} €`);
+  return { rechnung: await env.DB.prepare("SELECT * FROM rechnungen WHERE id=?").bind(id).first() };
+}
+async function setInvoiceStatus(req, env, u, id) {
+  const b = await body(req);
+  const old = await env.DB.prepare("SELECT * FROM rechnungen WHERE id=?").bind(id).first();
+  if (!old) fail(404, "Rechnung nicht gefunden.");
+  if (!INVOICE_STATUSES.includes(b.status)) fail(400, "Unbekannter Status.");
+  if (old.status === "Storniert") fail(409, "Die Rechnung ist storniert und bleibt es.");
+  if (b.status === "Storniert") needVorstand(u);
+  const am = b.status === "Bezahlt" ? clean(b.bezahlt_am, 10) || nowIso().slice(0, 10) : "";
+  if (!validDate(am)) fail(400, "Datum ungültig.");
+  await env.DB.prepare("UPDATE rechnungen SET status=?, bezahlt_am=?, geaendert=?, geaendert_von=? WHERE id=?").bind(b.status, am, nowIso(), u.anzeigename, id).run();
+  await log(env, u, b.status === "Storniert" ? "Rechnung storniert" : "Rechnungsstatus", old.nummer, b.status + (am ? " am " + am : ""));
+  return { rechnung: await env.DB.prepare("SELECT * FROM rechnungen WHERE id=?").bind(id).first() };
+}
+
 /* ---- Benutzer (nur Admins) ---- */
 async function listUsers(env) {
   const { results } = await env.DB.prepare("SELECT * FROM benutzer ORDER BY rolle DESC, anzeigename").all();
@@ -551,8 +701,11 @@ async function exportAll(env) {
   const el = await env.DB.prepare("SELECT * FROM eltern ORDER BY mannschaft, name").all();
   const an = await env.DB.prepare("SELECT id, eintrag_id, dateiname, mime, groesse, erstellt, erstellt_von FROM anhaenge").all();
   const zs = await env.DB.prepare("SELECT z.eintrag_id, b.anzeigename, z.antwort, z.geaendert FROM zusagen z JOIN benutzer b ON b.id=z.benutzer_id").all();
+  const re = await env.DB.prepare("SELECT * FROM rechnungen ORDER BY jahr, lfd").all();
+  const dl = await env.DB.prepare("SELECT * FROM downloads").all();
   return { format: "sku-vereinszentrale", exportiert: nowIso(), eintraege: e.results, dokumente: d.results, protokoll: p.results,
-    mitglieder: mg.results, eltern: el.results, anhaenge: an.results, zusagen: zs.results };
+    mitglieder: mg.results, eltern: el.results, anhaenge: an.results, zusagen: zs.results, rechnungen: re.results, downloads: dl.results,
+    einstellungen: (await getSettings(env)).verein };
 }
 
 /* ---------------- Router ---------------- */
@@ -587,6 +740,23 @@ async function route(req, env, cors) {
     if (M === "GET") return downloadAttachment(env, u, m[1], cors);
     if (M === "DELETE") return json(await deleteAttachment(env, u, m[1]), 200, cors);
   }
+
+  if (p === "/api/downloads" && M === "GET") return json(await listDownloads(env), 200, cors);
+  if (p === "/api/downloads" && M === "POST") return json(await saveDownload(req, env, u, null), 200, cors);
+  if ((m = p.match(/^\/api\/downloads\/([\w-]+)$/))) {
+    if (M === "PUT") return json(await saveDownload(req, env, u, m[1]), 200, cors);
+    if (M === "DELETE") return json(await deleteDownload(env, u, m[1]), 200, cors);
+  }
+  if ((m = p.match(/^\/api\/downloads\/([\w-]+)\/datei$/))) {
+    if (M === "PUT") return json(await uploadDownload(req, env, u, m[1]), 200, cors);
+    if (M === "GET") return getDownload(env, m[1], cors);
+  }
+  if (p === "/api/einstellungen" && M === "GET") return json(await getSettings(env), 200, cors);
+  if (p === "/api/einstellungen/verein" && M === "PUT") return json(await saveSettings(req, env, u), 200, cors);
+  if (p === "/api/rechnungen" && M === "GET") return json(await listInvoices(env), 200, cors);
+  if (p === "/api/rechnungen" && M === "POST") return json(await createInvoice(req, env, u), 200, cors);
+  if ((m = p.match(/^\/api\/rechnungen\/([\w-]+)$/)) && M === "PUT") return json(await updateInvoice(req, env, u, m[1]), 200, cors);
+  if ((m = p.match(/^\/api\/rechnungen\/([\w-]+)\/status$/)) && M === "POST") return json(await setInvoiceStatus(req, env, u, m[1]), 200, cors);
 
   if ((m = p.match(/^\/api\/(mitglieder|eltern)(?:\/([\w-]+))?$/))) {
     const P = PEOPLE[m[1]], id = m[2];

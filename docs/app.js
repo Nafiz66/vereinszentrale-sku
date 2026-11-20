@@ -27,6 +27,10 @@ const MEMBER_STATUSES = ["Aktiv","Passiv","Ausgetreten"];
 const MAX_FILE = 10 * 1024 * 1024, MAX_IMPORT = 1000;
 const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
 
+const DL_CATS = ["Formulare","Sponsoren","Logos & Werbematerial","Sonstiges"];
+const CLUB = "FC Sender Kickers United";
+let downloads = [], invoices = [], settings = {}, editingInvoiceId = null, viewInvoiceId = null, activeDlId = null;
+let iFilter = { q: "", status: "", jahr: "" };
 let me = null, entries = [], docs = [], users = [], members = [], parents = [];
 let sections = [], section = 0, filter = "", search = "", calMonth = today().slice(0,7), calView = "monat";
 let mFilter = { q: "", team: "", status: "" };
@@ -120,7 +124,7 @@ $("setupForm").onsubmit = e => { e.preventDefault(); busy(e.target, async () => 
 
 async function logout() {
   try { await api("/api/logout", { method: "POST" }); } catch {}
-  clearToken(); me = null; entries = docs = users = members = parents = []; showLogin("Du wurdest abgemeldet.");
+  clearToken(); me = null; entries = docs = users = members = parents = downloads = invoices = []; settings = {}; invDraft = null; showLogin("Du wurdest abgemeldet.");
 }
 let idleTimer;
 function resetIdle() {
@@ -132,7 +136,7 @@ function resetIdle() {
 /* ---------------- App-Aufbau ---------------- */
 const isVorstand = () => me?.rolle === "vorstand";
 function buildSections() {
-  sections = ["Übersicht", ...GROUPS.filter(g => me.bereiche.includes(g)), "Mitglieder"];
+  sections = ["Übersicht", ...GROUPS.filter(g => me.bereiche.includes(g)), "Mitglieder", "Downloads", "Rechnungen", "Rechnung erstellen"];
   if (isVorstand()) sections.push("Dokumente", "Änderungsprotokoll");
   if (me.ist_admin) sections.push("Benutzer");
   sections.push("Mein Konto");
@@ -152,7 +156,9 @@ async function startApp() {
 async function reload() {
   try {
     const jobs = [api("/api/eintraege").then(r => entries = r.eintraege),
-      api("/api/mitglieder").then(r => members = r.liste), api("/api/eltern").then(r => parents = r.liste)];
+      api("/api/mitglieder").then(r => members = r.liste), api("/api/eltern").then(r => parents = r.liste),
+      api("/api/downloads").then(r => downloads = r.downloads), api("/api/rechnungen").then(r => invoices = r.rechnungen),
+      api("/api/einstellungen").then(r => settings = r)];
     if (isVorstand()) jobs.push(api("/api/dokumente").then(r => docs = r.dokumente));
     if (me.ist_admin) jobs.push(api("/api/benutzer").then(r => users = r.benutzer));
     await Promise.all(jobs);
@@ -215,16 +221,22 @@ function mini(items, empty) {
 function render(reset = false) {
   if (!me) return;
   const next = Number(location.hash.match(/^#bereich-(\d+)$/)?.[1]) || 0;
-  if (reset || next !== section) { filter = ""; search = ""; mFilter = { q: "", team: "", status: "" }; }
+  if (reset || next !== section) {
+    filter = ""; search = ""; mFilter = { q: "", team: "", status: "" }; iFilter = { q: "", status: "", jahr: "" };
+    if (sections[next] !== "Rechnung erstellen" && editingInvoiceId) { editingInvoiceId = null; invDraft = null; }
+  }
   section = next < sections.length ? next : 0;
   const name = sections[section];
   $("hero").hidden = section !== 0;
   $("crumb").textContent = section ? name : "Vereinszentrale";
-  $("add").hidden = ["Änderungsprotokoll","Mein Konto"].includes(name);
-  $("add").textContent = name === "Dokumente" ? "＋ Dokument" : name === "Benutzer" ? "＋ Benutzer" : name === "Mitglieder" ? "＋ Mitglied" : "＋ Eintrag";
+  $("add").hidden = ["Änderungsprotokoll","Mein Konto","Rechnung erstellen"].includes(name);
+  $("add").textContent = { Dokumente: "＋ Dokument", Benutzer: "＋ Benutzer", Mitglieder: "＋ Mitglied", Downloads: "＋ Datei hochladen", Rechnungen: "＋ Rechnung erstellen" }[name] || "＋ Eintrag";
   renderNav();
   if (!section) renderHome();
   else if (name === "Mitglieder") renderMembers();
+  else if (name === "Downloads") renderDownloads();
+  else if (name === "Rechnungen") renderInvoices();
+  else if (name === "Rechnung erstellen") renderInvoiceForm();
   else if (name === "Dokumente") renderDocs();
   else if (name === "Änderungsprotokoll") renderLog();
   else if (name === "Benutzer") renderUsers();
@@ -1026,8 +1038,383 @@ mailForm.onsubmit = async e => {
   $("mailDialog").close();
 };
 
+/* ---------------- Drucken (Rechnung, Mitgliedsantrag) ---------------- */
+function printPaper(html, title) {
+  const old = document.title;
+  $("printArea").innerHTML = html; document.body.classList.add("printmode"); if (title) document.title = title;
+  const done = () => { document.body.classList.remove("printmode"); document.title = old; window.removeEventListener("afterprint", done); };
+  window.addEventListener("afterprint", done);
+  // Bilder (Logo) erst laden, dann drucken
+  const imgs = [...$("printArea").querySelectorAll("img")].filter(i => !i.complete);
+  Promise.all(imgs.map(i => new Promise(r => { i.onload = i.onerror = r; }))).then(() => { window.print(); setTimeout(done, 500); });
+}
+const fmtEur = c => (c / 100).toLocaleString("de-DE", { style: "currency", currency: "EUR" });
+const fmtNum = n => Number(n).toLocaleString("de-DE", { maximumFractionDigits: 3 });
+const lines = s => esc(s).replace(/\n/g, "<br>");
+function paperHead() {
+  return `<div class="p-head"><div><div class="p-club">${CLUB.toUpperCase()}</div><div class="p-sub">MÜHLACKER · JUGENDFUSSBALL</div></div><img class="p-logo" src="logo.png" alt="Logo ${CLUB}"></div>`;
+}
+function paperFoot(a) {
+  const c1 = [CLUB, a.adresse, a.vorsitz && "Vertreten durch: " + a.vorsitz, a.register].filter(Boolean).join("\n");
+  const c2 = [a.telefon && "Tel. " + a.telefon, a.email, a.web, a.fusszeile].filter(Boolean).join("\n");
+  const c3 = [a.bank, a.iban && "IBAN " + a.iban, a.bic && "BIC " + a.bic, a.steuernummer && "St.-Nr. " + a.steuernummer, a.ustid && "USt-IdNr. " + a.ustid].filter(Boolean).join("\n");
+  return `<div class="p-foot"><div>${esc(c1)}</div><div>${esc(c2)}</div><div>${esc(c3)}</div></div>`;
+}
+
+/* ---------------- Downloads ---------------- */
+const DL_HINTS = {
+  "Formulare": "z. B. Mitgliedsantrag als PDF, Austrittserklärung, Einverständnis für Fotos, Spielerpass-Antrag",
+  "Sponsoren": "z. B. Sponsoring-Mappe, Preisliste Bandenwerbung/Trikotwerbung, Sponsorenvertrag, Spendenbescheinigung-Vorlage",
+  "Logos & Werbematerial": "z. B. Logo als SVG/PDF/EPS für Druckereien, Logo in Weiß/Schwarz, Flyer, Plakate, Vereinsfarben",
+  "Sonstiges": "alles andere, was ihr öfter braucht",
+};
+function renderDownloads() {
+  const card = d => `<article class="card"><div class="cardtop"><h3>${esc(d.titel)}</h3></div>
+    <div class="meta">${esc(d.groesse ? `${d.dateiname} · ${fmtBytes(d.groesse)}` : "Noch keine Datei hochgeladen")} · ${esc(fmtTime(d.geaendert))}</div>
+    ${d.beschreibung ? `<p class="body">${esc(d.beschreibung)}</p>` : ""}
+    <div class="actions">${d.groesse ? `<button data-dlopen="${esc(d.id)}">Öffnen</button><button class="quiet" data-dldl="${esc(d.id)}">Herunterladen</button>` : ""}
+      <button class="quiet" data-dledit="${esc(d.id)}">${d.groesse ? "Bearbeiten" : "Datei hochladen"}</button></div></article>`;
+  $("view").innerHTML = `<div class="sectionhead"><h2>Downloads</h2><span class="muted small">Nur für Vorstand und Ausschuss</span></div>
+    <h3 class="dlcat">Von der Vereinszentrale erstellt</h3>
+    <div class="dlgrid">
+      <article class="card"><h3>Mitgliedsantrag (Aufnahmeantrag)</h3>
+        <p class="body muted">Mit Vereinslogo, Angaben zum Mitglied, Erziehungsberechtigten, Beitrag, SEPA-Lastschriftmandat, Einwilligungen und Unterschrift. Adresse, Gläubiger-ID und Beitragstext kommen aus den <a class="link" href="#" data-act="settings">Vereinsdaten</a>.</p>
+        <p class="muted small">Bitte vor dem ersten Einsatz vom Vorstand prüfen lassen.</p>
+        <div class="actions"><button data-act="printMembership">Drucken / als PDF speichern</button></div></article>
+      <article class="card"><h3>Logo-Paket</h3>
+        <p class="body muted">Vereinswappen für Bildschirm, Webseite, Social Media und Word/PowerPoint.</p>
+        <p class="muted small">⚠ Das vorhandene Logo hat nur 400 × 400 Pixel und einen dunklen Hintergrund. <b>Für Druck</b> (Trikots, Banner, Flyer) braucht die Druckerei eine Vektordatei (SVG, PDF oder EPS) mit transparentem Hintergrund. Die bekommt ihr vom Designer. Ladet sie dann unten bei „Logos &amp; Werbematerial“ hoch.</p>
+        <div class="actions"><button class="quiet" data-act="logoPng">PNG (400 × 400)</button><button class="quiet" data-act="logoJpg">JPG (für Office)</button><button class="quiet" data-act="logoIcon">App-Symbol (180 × 180)</button></div></article>
+    </div>
+    ${DL_CATS.map(c => {
+      const list = downloads.filter(d => d.kategorie === c);
+      return `<div class="sectionhead"><h3 class="dlcat" style="margin:0">${esc(c)} <span class="muted small">(${list.length})</span></h3><button class="quiet" data-dlnew="${esc(c)}">＋ Hochladen</button></div>
+        <div class="dlgrid">${list.map(card).join("") || `<article class="card hintcard"><p class="muted small">Noch nichts hochgeladen – ${esc(DL_HINTS[c])}.</p></article>`}</div>`;
+    }).join("")}`;
+}
+const dlForm = $("dlForm"), dlfield = n => dlForm.elements.namedItem(n);
+function editDownload(id, cat) {
+  activeDlId = id || null; const d = downloads.find(x => x.id === id);
+  $("dlFormTitle").textContent = d ? "Download bearbeiten" : "Datei hochladen";
+  dlfield("kategorie").innerHTML = options(DL_CATS, d?.kategorie || cat || DL_CATS[0]);
+  dlfield("titel").value = d?.titel || ""; dlfield("beschreibung").value = d?.beschreibung || ""; dlfield("datei").value = "";
+  $("dlFileInfo").textContent = d?.groesse ? `Aktuell: ${d.dateiname} (${fmtBytes(d.groesse)}) – neue Datei wählen, um sie zu ersetzen.` : "";
+  $("dlRemove").hidden = !d || !me.darf_loeschen; $("dlError").textContent = "";
+  $("dlEditor").showModal();
+}
+dlfield("datei").onchange = () => { const f = dlfield("datei").files[0]; if (f && !dlfield("titel").value.trim()) dlfield("titel").value = f.name.replace(/\.[^.]+$/, "").slice(0, 160); };
+dlForm.onsubmit = async e => {
+  e.preventDefault();
+  const file = dlfield("datei").files[0];
+  if (file && file.size > MAX_FILE) { $("dlError").textContent = "Datei zu groß (max. 10 MB)."; return; }
+  if (!activeDlId && !file) { $("dlError").textContent = "Bitte eine Datei auswählen."; return; }
+  $("dlSave").disabled = true; $("dlError").textContent = "";
+  try {
+    const r = await api(activeDlId ? "/api/downloads/" + activeDlId : "/api/downloads", { method: activeDlId ? "PUT" : "POST",
+      data: { titel: dlfield("titel").value, kategorie: dlfield("kategorie").value, beschreibung: dlfield("beschreibung").value } });
+    activeDlId = r.download.id;
+    if (file) { $("dlSave").textContent = "Lädt hoch …"; await api(`/api/downloads/${r.download.id}/datei`, { method: "PUT", raw: file, headers: { "Content-Type": file.type || "application/octet-stream", "X-Dateiname": encodeURIComponent(file.name) } }); }
+    $("dlEditor").close(); notice("Download gespeichert.", true); await reload();
+  } catch (err) { $("dlError").textContent = err.message; await reload(); }
+  finally { $("dlSave").disabled = false; $("dlSave").textContent = "Speichern"; }
+};
+$("dlRemove").onclick = async () => {
+  const d = downloads.find(x => x.id === activeDlId);
+  if (!d || !confirm(`„${d.titel}“ wirklich löschen?`)) return;
+  try { await api("/api/downloads/" + d.id, { method: "DELETE" }); $("dlEditor").close(); notice("Download gelöscht.", true); await reload(); }
+  catch (err) { $("dlError").textContent = err.message; }
+};
+async function openDownload(id, save) {
+  const d = downloads.find(x => x.id === id); if (!d) return;
+  const win = save ? null : window.open("", "_blank");
+  try {
+    const blob = new Blob([await api(`/api/downloads/${id}/datei`, { blob: true })], { type: d.mime || "application/octet-stream" });
+    if (win && /^(application\/pdf|image\/|text\/plain)/.test(d.mime)) { const url = URL.createObjectURL(blob); win.location = url; setTimeout(() => URL.revokeObjectURL(url), 120000); }
+    else { if (win) win.close(); download(blob, d.dateiname); }
+  } catch (e) { if (win) win.close(); notice(e.message); }
+}
+async function logoFile(kind) {
+  try {
+    if (kind === "png") return download(await (await fetch("logo.png")).blob(), "FC-Sender-Kickers-United_Logo_400.png");
+    if (kind === "icon") return download(await (await fetch("apple-touch-icon.png")).blob(), "FC-Sender-Kickers-United_Symbol_180.png");
+    const img = new Image(); img.src = "logo.png"; await img.decode();
+    const c = document.createElement("canvas"); c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0);
+    c.toBlob(b => download(b, "FC-Sender-Kickers-United_Logo_400.jpg"), "image/jpeg", 0.95);
+  } catch { notice("Logo konnte nicht erstellt werden."); }
+}
+function membershipHtml() {
+  const a = settings.verein || {};
+  const f = label => `<div class="p-field">${esc(label)}</div>`;
+  return `<div class="paper">${paperHead()}
+    <h1>Aufnahmeantrag</h1>
+    <p>Hiermit beantrage ich die Mitgliedschaft im <b>${CLUB}</b>${a.adresse ? ` (${esc(a.adresse.replace(/\n/g, ", "))})` : ""}.</p>
+    <div class="p-box"><h3>Angaben zum Mitglied</h3><div class="p-fields">
+      ${f("Vorname")}${f("Nachname")}${f("Geburtsdatum")}${f("Mannschaft / Jahrgang")}${f("Straße, Hausnummer")}${f("PLZ, Ort")}${f("Telefon")}${f("E-Mail")}${f("Mitglied ab (Datum)")}${f("Staatsangehörigkeit (für Spielerpass)")}
+    </div></div>
+    <div class="p-box"><h3>Bei Minderjährigen: Erziehungsberechtigte</h3><div class="p-fields">
+      ${f("Name Erziehungsberechtigte/r 1")}${f("Name Erziehungsberechtigte/r 2")}${f("Telefon")}${f("E-Mail")}
+    </div></div>
+    <div class="p-box"><h3>Mitgliedsbeitrag</h3><p class="p-text">${a.beitrag_text ? esc(a.beitrag_text) : "Der Beitrag richtet sich nach der aktuellen Beitragsordnung des Vereins."}</p></div>
+    <div class="p-box"><h3>SEPA-Lastschriftmandat</h3>
+      <p style="font-size:11px">Gläubiger-ID: <b>${esc(a.glaeubiger_id || "______________________")}</b> · Mandatsreferenz: wird separat mitgeteilt</p>
+      <p style="font-size:10.5px">Ich ermächtige den ${CLUB}, Zahlungen von meinem Konto mittels Lastschrift einzuziehen. Zugleich weise ich mein Kreditinstitut an, die vom ${CLUB} auf mein Konto gezogenen Lastschriften einzulösen. Hinweis: Ich kann innerhalb von acht Wochen, beginnend mit dem Belastungsdatum, die Erstattung des belasteten Betrages verlangen. Es gelten dabei die mit meinem Kreditinstitut vereinbarten Bedingungen.</p>
+      <div class="p-fields">${f("Kontoinhaber/in")}${f("Kreditinstitut")}${f("IBAN")}${f("BIC")}</div>
+    </div>
+    <div class="p-box"><h3>Erklärungen</h3>
+      <div class="p-check">Ich erkenne die Satzung des Vereins an.</div>
+      <div class="p-check">Ich willige ein, dass meine Daten (bzw. die meines Kindes) zur Mitgliederverwaltung, Beitragsabrechnung und Teilnahme am Spielbetrieb verarbeitet werden. Die Datenschutzhinweise des Vereins habe ich erhalten.</div>
+      <div class="p-check">Freiwillig: Ich bin einverstanden, dass Fotos von Vereinsveranstaltungen, auf denen ich bzw. mein Kind zu sehen bin/ist, auf der Webseite und in sozialen Medien des Vereins veröffentlicht werden. Die Einwilligung kann jederzeit widerrufen werden.</div>
+    </div>
+    <div class="p-sign"><div>Ort, Datum</div><div>Unterschrift Mitglied bzw. Erziehungsberechtigte/r</div></div>
+    ${paperFoot(a)}</div>`;
+}
+
+/* ---------------- Vereinsdaten / Vorlage ---------------- */
+const settingsForm = $("settingsForm"), sfield = n => settingsForm.elements.namedItem(n);
+const VEREIN_KEYS = ["adresse","telefon","email","web","vorsitz","register","steuernummer","ustid","bank","iban","bic","glaeubiger_id","ersteller","mwst","zahlungsziel","einleitung","schlusstext","fusszeile","beitrag_text"];
+function openSettings() {
+  const v = settings.verein || {};
+  for (const k of VEREIN_KEYS) sfield(k).value = v[k] ?? "";
+  $("settingsMeta").textContent = settings.geaendert ? `Zuletzt geändert ${fmtTime(settings.geaendert)} von ${settings.geaendert_von}` : "";
+  $("settingsError").textContent = ""; $("settingsEditor").showModal();
+}
+settingsForm.onsubmit = async e => {
+  e.preventDefault(); $("settingsError").textContent = "";
+  try {
+    settings = await api("/api/einstellungen/verein", { method: "PUT", data: Object.fromEntries(VEREIN_KEYS.map(k => [k, sfield(k).value.trim()])) });
+    $("settingsEditor").close(); notice("Vereinsdaten gespeichert. Sie gelten für neue Rechnungen.", true); render();
+  } catch (err) { $("settingsError").textContent = err.message; }
+};
+
+/* ---------------- Rechnungen ---------------- */
+const parseDe = s => { s = String(s ?? "").trim().replace(/\s|€/g, ""); if (!s) return NaN; if (s.includes(",")) s = s.replace(/\./g, "").replace(",", "."); return Number(s); };
+const numDe = n => n === "" || n === null || n === undefined || Number.isNaN(n) ? "" : String(n).replace(".", ",");
+const addDays = (iso, n) => { const d = new Date(iso + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+function calcTotals(pos) {
+  const byRate = new Map();
+  for (const p of pos) byRate.set(p.mwst, (byRate.get(p.mwst) || 0) + Math.round(p.menge * p.preis));
+  const rates = [...byRate.entries()].sort((a, b) => a[0] - b[0]).map(([r, net]) => [r, net, Math.round(net * r / 100)]);
+  const netto = rates.reduce((a, x) => a + x[1], 0), steuer = rates.reduce((a, x) => a + x[2], 0);
+  return { rates, netto, steuer, brutto: netto + steuer };
+}
+const parseInv = r => ({ ...r, positionen: JSON.parse(r.positionen || "[]"), absender: JSON.parse(r.absender || "{}") });
+function invoiceHtml(inv) {
+  const a = inv.absender || {}, t = calcTotals(inv.positionen);
+  const fill = s => String(s || "").replace(/\{nummer\}/g, inv.nummer).replace(/\{faellig\}/g, dateText(inv.faellig) || "–")
+    .replace(/\{betrag\}/g, fmtEur(t.brutto)).replace(/\{ersteller\}/g, a.ersteller || "").replace(/\{datum\}/g, dateText(inv.datum));
+  const zero = t.rates.every(r => r[0] === 0);
+  const meta = [["Rechnungsnr.", inv.nummer], ["Rechnungsdatum", dateText(inv.datum)], ["Leistungsdatum", dateText(inv.leistungsdatum)],
+    ["Zahlbar bis", dateText(inv.faellig)], ["Ansprechpartner", a.ersteller]].filter(x => x[1]);
+  return `<div class="paper">${inv.status === "Storniert" ? '<div class="p-stamp">STORNIERT</div>' : ""}${paperHead()}
+    <div class="p-row"><div><div class="p-sender">${esc([CLUB, ...String(a.adresse || "").split("\n")].filter(Boolean).join(" · "))}</div>
+      <div class="p-to">${esc(inv.empfaenger)}</div></div>
+      <dl class="p-meta">${meta.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>
+    <h1>Rechnung ${esc(inv.nummer)}</h1>${inv.betreff ? `<p><b>${esc(inv.betreff)}</b></p>` : ""}
+    ${inv.einleitung ? `<p class="p-text">${esc(fill(inv.einleitung))}</p>` : ""}
+    <table><thead><tr><th>Pos.</th><th>Beschreibung</th><th class="r">Menge</th><th class="r">Einzelpreis</th>${zero ? "" : '<th class="r">MwSt.</th>'}<th class="r">Gesamt</th></tr></thead><tbody>
+      ${inv.positionen.map((p, i) => `<tr><td>${i + 1}</td><td>${lines(p.beschreibung)}</td><td class="r">${esc(fmtNum(p.menge))}${p.einheit ? " " + esc(p.einheit) : ""}</td>
+        <td class="r">${fmtEur(p.preis)}</td>${zero ? "" : `<td class="r">${esc(fmtNum(p.mwst))} %</td>`}<td class="r">${fmtEur(Math.round(p.menge * p.preis))}</td></tr>`).join("")}
+    </tbody></table>
+    <table class="p-totals">${zero ? "" : `<tr><td>Summe netto</td><td class="r">${fmtEur(t.netto)}</td></tr>` +
+      t.rates.filter(r => r[0] > 0).map(r => `<tr><td>zzgl. ${esc(fmtNum(r[0]))} % MwSt. auf ${fmtEur(r[1])}</td><td class="r">${fmtEur(r[2])}</td></tr>`).join("")}
+      <tr class="grand"><td>Gesamtbetrag</td><td class="r">${fmtEur(t.brutto)}</td></tr></table>
+    ${inv.schlusstext ? `<p class="p-text" style="margin-top:14px">${esc(fill(inv.schlusstext))}</p>` : ""}
+    ${paperFoot(a)}</div>`;
+}
+const nextNumber = jahr => `SKU-${jahr}-${String(Math.max(0, ...invoices.filter(i => i.jahr === Number(jahr)).map(i => i.lfd)) + 1).padStart(4, "0")}`;
+const isOverdue = i => i.status === "Offen" && i.faellig && i.faellig < today();
+function renderInvoices() {
+  const years = distinct(invoices.map(i => String(i.jahr))).reverse();
+  const y = today().slice(0, 4);
+  const open = invoices.filter(i => i.status === "Offen"), paidYear = invoices.filter(i => i.status === "Bezahlt" && String(i.jahr) === y);
+  const q = iFilter.q.trim().toLocaleLowerCase("de");
+  const list = invoices.filter(i => (!iFilter.status || i.status === iFilter.status) && (!iFilter.jahr || String(i.jahr) === iFilter.jahr)
+    && (!q || [i.nummer, i.empfaenger, i.betreff].join(" ").toLocaleLowerCase("de").includes(q)));
+  $("view").innerHTML = `<div class="sectionhead"><h2>Rechnungen</h2><div class="actions" style="margin:0"><button class="quiet" data-act="settings">Vereinsdaten &amp; Vorlage</button></div></div>
+    <div class="stats">
+      <div class="stat"><strong>${open.length}</strong>offen · ${fmtEur(open.reduce((a, i) => a + i.brutto, 0))}</div>
+      <div class="stat"><strong>${open.filter(isOverdue).length}</strong>überfällig</div>
+      <div class="stat"><strong>${paidYear.length}</strong>bezahlt ${y} · ${fmtEur(paidYear.reduce((a, i) => a + i.brutto, 0))}</div>
+      <div class="stat"><strong>${invoices.length}</strong>Rechnungen gesamt</div>
+    </div>
+    ${invoices.length ? `<div class="filters">
+      <input id="isearch" type="search" placeholder="Nummer, Empfänger, Betreff …" aria-label="Rechnungen durchsuchen" value="${esc(iFilter.q)}">
+      <select id="istatus" aria-label="Status filtern"><option value="">Alle Status</option>${options(["Offen","Bezahlt","Storniert"], iFilter.status)}</select>
+      <select id="ijahr" aria-label="Jahr filtern"><option value="">Alle Jahre</option>${options(years, iFilter.jahr)}</select></div>
+    <div class="tablewrap"><table class="table"><thead><tr><th>Nummer</th><th>Datum</th><th>Empfänger</th><th>Betreff</th><th class="money">Betrag</th><th>Status</th><th>Fällig</th><th></th></tr></thead><tbody>
+    ${list.map(i => `<tr><td style="white-space:nowrap"><b>${esc(i.nummer)}</b></td><td>${esc(dateText(i.datum))}</td><td>${esc(i.empfaenger.split("\n")[0])}</td><td>${esc(i.betreff)}</td>
+      <td class="money">${fmtEur(i.brutto)}</td><td>${badge(i.status)}${i.status === "Bezahlt" && i.bezahlt_am ? `<div class="lock">${esc(dateText(i.bezahlt_am))}</div>` : ""}</td>
+      <td class="${isOverdue(i) ? "overdue" : "lock"}">${esc(dateText(i.faellig))}${isOverdue(i) ? " ⚠" : ""}</td>
+      <td><button class="quiet" data-invview="${esc(i.id)}">Ansehen</button></td></tr>`).join("") || '<tr><td colspan="8" class="muted">Keine Treffer.</td></tr>'}
+    </tbody></table></div>` : `<section class="card"><h3>Noch keine Rechnungen</h3><p class="muted" style="margin-top:6px">Klicke auf <b>＋ Rechnung erstellen</b>. Trage vorher am besten einmal die <a class="link" href="#" data-act="settings">Vereinsdaten</a> ein (Anschrift, Bank, Steuernummer), dann sind sie in jeder Rechnung schon ausgefüllt.</p></section>`}`;
+  if (!invoices.length) return;
+  $("isearch").oninput = e => { iFilter.q = e.target.value; renderInvoices(); $("isearch").focus(); $("isearch").setSelectionRange(9999, 9999); };
+  $("istatus").onchange = e => { iFilter.status = e.target.value; renderInvoices(); };
+  $("ijahr").onchange = e => { iFilter.jahr = e.target.value; renderInvoices(); };
+}
+function viewInvoice(id) {
+  const raw = invoices.find(i => i.id === id); if (!raw) return;
+  viewInvoiceId = id;
+  $("invoiceViewBody").innerHTML = `<div class="previewwrap" style="margin:0">${invoiceHtml(parseInv(raw))}</div>
+    <p class="muted small" style="margin-top:8px">Erstellt ${esc(fmtTime(raw.erstellt))} von ${esc(raw.erstellt_von)}${raw.geaendert !== raw.erstellt ? ` · zuletzt geändert ${esc(fmtTime(raw.geaendert))} von ${esc(raw.geaendert_von)}` : ""}</p>`;
+  $("invStorno").hidden = !isVorstand() || raw.status === "Storniert";
+  $("invPaid").hidden = raw.status !== "Offen"; $("invOpen").hidden = raw.status !== "Bezahlt"; $("invEdit").hidden = raw.status === "Storniert";
+  $("invoiceError").textContent = "";
+  if (!$("invoiceView").open) $("invoiceView").showModal();
+}
+async function setInvoiceStatus(status) {
+  const raw = invoices.find(i => i.id === viewInvoiceId); if (!raw) return;
+  let bezahlt_am = "";
+  if (status === "Storniert" && !confirm(`Rechnung ${raw.nummer} wirklich stornieren?\n\nDie Rechnung bleibt mit ihrer Nummer erhalten (Pflicht für die Buchhaltung), wird aber als STORNIERT markiert und kann nicht mehr geändert werden.`)) return;
+  if (status === "Bezahlt") { bezahlt_am = prompt("Bezahlt am (TT.MM.JJJJ):", dateText(today())); if (bezahlt_am === null) return; bezahlt_am = parseDate(bezahlt_am); if (!bezahlt_am) { $("invoiceError").textContent = "Datum nicht erkannt."; return; } }
+  try {
+    await api(`/api/rechnungen/${raw.id}/status`, { method: "POST", data: { status, bezahlt_am } });
+    await reload(); viewInvoice(raw.id); notice(`Rechnung ${raw.nummer}: ${status}.`, true);
+  } catch (e) { $("invoiceError").textContent = e.message; }
+}
+$("invPrint").onclick = () => { const raw = invoices.find(i => i.id === viewInvoiceId); if (raw) printPaper(invoiceHtml(parseInv(raw)), `Rechnung ${raw.nummer}`); };
+$("invPaid").onclick = () => setInvoiceStatus("Bezahlt");
+$("invOpen").onclick = () => setInvoiceStatus("Offen");
+$("invStorno").onclick = () => setInvoiceStatus("Storniert");
+$("invEdit").onclick = () => { $("invoiceView").close(); editInvoice(viewInvoiceId); };
+
+// Rechnung erstellen / bearbeiten
+let invDraft = null;
+const ABS_FIELDS = [["ersteller","Rechnungsersteller / Ansprechpartner"],["adresse","Anschrift des Vereins",1],["telefon","Telefon"],["email","E-Mail"],["web","Webseite"],
+  ["vorsitz","Vertreten durch"],["register","Vereinsregister"],["steuernummer","Steuernummer"],["ustid","USt-IdNr."],["bank","Bank"],["iban","IBAN"],["bic","BIC"],["fusszeile","Zusätzliche Fußzeile",1]];
+function goInvoiceForm() { const h = route(IDX("Rechnung erstellen")); if (location.hash === h) render(); else location.hash = h; }
+function newInvoice() { editingInvoiceId = null; invDraft = null; goInvoiceForm(); }
+function editInvoice(id) { editingInvoiceId = id; invDraft = null; goInvoiceForm(); }
+function makeDraft() {
+  const v = settings.verein || {}, raw = invoices.find(i => i.id === editingInvoiceId);
+  if (raw) {
+    const r = parseInv(raw);
+    return { _for: raw.id, nummer: raw.nummer, geaendert: raw.geaendert, datum: r.datum, leistungsdatum: r.leistungsdatum, faellig: r.faellig, faelligManual: true,
+      empfaenger: r.empfaenger, betreff: r.betreff, einleitung: r.einleitung, schlusstext: r.schlusstext, absender: { ...r.absender },
+      positionen: r.positionen.map(p => ({ beschreibung: p.beschreibung, menge: numDe(p.menge), einheit: p.einheit, preis: numDe((p.preis / 100).toFixed(2)), mwst: numDe(p.mwst) })) };
+  }
+  const d = today(), ziel = Number(v.zahlungsziel) || 0;
+  return { _for: "new", datum: d, leistungsdatum: d, faellig: ziel ? addDays(d, ziel) : "", faelligManual: false, empfaenger: "", betreff: "",
+    einleitung: v.einleitung || "", schlusstext: v.schlusstext || "", absender: Object.fromEntries(ABS_FIELDS.map(([k]) => [k, v[k] || ""])),
+    positionen: [{ beschreibung: "", menge: "1", einheit: "", preis: "", mwst: numDe(v.mwst ?? "19") }] };
+}
+function draftPositions(strict) {
+  return invDraft.positionen.map((p, i) => {
+    const x = { beschreibung: p.beschreibung.trim(), menge: parseDe(p.menge), einheit: p.einheit.trim(), preis: Math.round(parseDe(p.preis) * 100), mwst: parseDe(p.mwst) };
+    if (strict) {
+      if (!x.beschreibung) throw new Error(`Position ${i + 1}: Bitte eine Beschreibung eingeben.`);
+      if (!Number.isFinite(x.menge)) throw new Error(`Position ${i + 1}: Menge ist keine Zahl.`);
+      if (!Number.isFinite(x.preis)) throw new Error(`Position ${i + 1}: Preis ist keine Zahl (z. B. 250,00).`);
+      if (!Number.isFinite(x.mwst) || x.mwst < 0 || x.mwst > 100) throw new Error(`Position ${i + 1}: MwSt. zwischen 0 und 100 %.`);
+    }
+    return { ...x, menge: Number.isFinite(x.menge) ? x.menge : 0, preis: Number.isFinite(x.preis) ? x.preis : 0, mwst: Number.isFinite(x.mwst) ? x.mwst : 0 };
+  });
+}
+function renderInvoiceForm() {
+  const raw = editingInvoiceId && invoices.find(i => i.id === editingInvoiceId);
+  if (editingInvoiceId && (!raw || raw.status === "Storniert")) { editingInvoiceId = null; invDraft = null; }
+  if (!invDraft || invDraft._for !== (editingInvoiceId || "new")) invDraft = makeDraft();
+  const D = invDraft, editing = !!editingInvoiceId;
+  const ta = (k, rows, ph = "") => `<textarea data-f="${k}" rows="${rows}" placeholder="${esc(ph)}">${esc(D[k])}</textarea>`;
+  $("view").innerHTML = `<form id="invForm" class="invform" novalidate>
+    <div class="sectionhead"><h2>${editing ? `Rechnung ${esc(D.nummer)} bearbeiten` : "Neue Rechnung"}</h2><div class="actions" style="margin:0">
+      <button type="button" class="quiet" data-act="settings">Vereinsdaten &amp; Vorlage</button>${editing ? '<button type="button" class="quiet" data-act="newInvoice">Neue Rechnung</button>' : ""}</div></div>
+    <section class="card"><p class="muted small">Rechnungsnummer: <b id="invNo">${esc(editing ? D.nummer : nextNumber(D.datum.slice(0, 4)))}</b> ${editing ? "(fest)" : "(wird beim Erstellen automatisch vergeben)"} · Absender: <b>${CLUB}</b> mit Logo</p>
+      <div class="fields">
+        <label>Rechnungsempfänger (Name und Anschrift)${ta("empfaenger", 5, "Firma Muster GmbH\nz. Hd. Frau Beispiel\nHauptstraße 1\n75417 Mühlacker")}</label>
+        <div><label>Rechnungsdatum<input type="date" data-f="datum" value="${esc(D.datum)}" required></label>
+          <label>Leistungsdatum / -zeitraum<input type="date" data-f="leistungsdatum" value="${esc(D.leistungsdatum)}"></label>
+          <label>Zahlbar bis<input type="date" data-f="faellig" value="${esc(D.faellig)}"></label></div>
+      </div>
+      <label>Betreff<input data-f="betreff" maxlength="200" value="${esc(D.betreff)}" placeholder="z. B. Bandenwerbung Saison 2026/27"></label>
+      <label>Einleitung${ta("einleitung", 2)}</label>
+    </section>
+    <section class="card"><h3>Positionen</h3>
+      <div class="tablewrap" style="margin-top:8px"><table class="table postable"><thead><tr><th>Beschreibung</th><th>Menge</th><th>Einheit</th><th>Einzelpreis netto €</th><th>MwSt. %</th><th class="money">Gesamt netto</th><th></th></tr></thead>
+      <tbody id="posBody"></tbody></table></div>
+      <div class="actions"><button type="button" class="quiet" data-act="addPos">＋ Position</button></div>
+      <div class="invtotals" id="invTotals"></div>
+    </section>
+    <section class="card"><label>Schlusstext${ta("schlusstext", 4)}</label>
+      <p class="muted small">Platzhalter: <code>{nummer}</code> <code>{faellig}</code> <code>{betrag}</code> <code>{ersteller}</code></p>
+      <details style="margin-top:12px"><summary>Absender, Bank und Ersteller für diese Rechnung ändern</summary>
+        <div class="fields">${ABS_FIELDS.map(([k, l, multi]) => `<label>${esc(l)}${multi ? `<textarea data-a="${k}" rows="2">${esc(D.absender[k] || "")}</textarea>` : `<input data-a="${k}" value="${esc(D.absender[k] || "")}">`}</label>`).join("")}</div>
+        <label class="check"><input type="checkbox" id="invSaveDefault"> Diese Angaben auch als Standard für künftige Rechnungen speichern</label>
+      </details>
+    </section>
+    <div id="invFormError" class="err" role="alert"></div>
+    <div class="actions"><button id="invSave">${editing ? "Änderungen speichern" : "Rechnung erstellen"}</button><button type="button" class="quiet" data-act="cancelInvoice">Abbrechen</button></div>
+  </form>
+  <h3 style="margin:24px 0 0">Vorschau</h3><div class="previewwrap" id="invPreview"></div>`;
+  renderPositions();
+  const f = $("invForm");
+  f.oninput = e => {
+    const t = e.target, ds = t.dataset;
+    if (ds.f) {
+      D[ds.f] = t.value;
+      if (ds.f === "faellig") D.faelligManual = true;
+      if (ds.f === "datum" && !D.faelligManual && /^\d{4}-/.test(t.value)) {
+        const ziel = Number(settings.verein?.zahlungsziel) || 0;
+        if (ziel) { D.faellig = addDays(t.value, ziel); f.querySelector('[data-f="faellig"]').value = D.faellig; }
+      }
+      if (ds.f === "datum" && !editing && /^\d{4}-/.test(t.value)) $("invNo").textContent = nextNumber(t.value.slice(0, 4));
+    } else if (ds.a) D.absender[ds.a] = t.value;
+    else if (ds.p) { const [i, k] = ds.p.split(":"); D.positionen[i][k] = t.value; }
+    updateInvPreview();
+  };
+  f.onsubmit = e => { e.preventDefault(); saveInvoice(); };
+}
+function renderPositions() {
+  $("posBody").innerHTML = invDraft.positionen.map((p, i) => `<tr>
+    <td><textarea data-p="${i}:beschreibung" rows="1" placeholder="z. B. Bandenwerbung 3 × 1 m, Saison 2026/27">${esc(p.beschreibung)}</textarea></td>
+    <td><input class="num" data-p="${i}:menge" inputmode="decimal" value="${esc(p.menge)}"></td>
+    <td><input class="small" data-p="${i}:einheit" value="${esc(p.einheit)}" placeholder="Stk."></td>
+    <td><input class="num" data-p="${i}:preis" inputmode="decimal" value="${esc(p.preis)}" placeholder="0,00"></td>
+    <td><input class="small" data-p="${i}:mwst" inputmode="decimal" value="${esc(p.mwst)}"></td>
+    <td class="money" id="posSum${i}"></td>
+    <td>${invDraft.positionen.length > 1 ? `<button type="button" class="quiet danger" data-delpos="${i}" aria-label="Position ${i + 1} entfernen">✕</button>` : ""}</td></tr>`).join("");
+  updateInvPreview();
+}
+function draftInvoice() {
+  const D = invDraft;
+  return { nummer: D.nummer || nextNumber((D.datum || today()).slice(0, 4)) + " (vorläufig)", datum: D.datum, leistungsdatum: D.leistungsdatum, faellig: D.faellig,
+    empfaenger: D.empfaenger, betreff: D.betreff, einleitung: D.einleitung, schlusstext: D.schlusstext, absender: D.absender, positionen: draftPositions(false), status: "Offen" };
+}
+function updateInvPreview() {
+  if (!$("invPreview")) return;
+  const inv = draftInvoice(), t = calcTotals(inv.positionen);
+  inv.positionen.forEach((p, i) => { const c = $("posSum" + i); if (c) c.textContent = fmtEur(Math.round(p.menge * p.preis)); });
+  $("invTotals").innerHTML = `<span>Summe netto</span><span class="money">${fmtEur(t.netto)}</span>` +
+    t.rates.filter(r => r[0] > 0).map(r => `<span>MwSt. ${esc(fmtNum(r[0]))} %</span><span class="money">${fmtEur(r[2])}</span>`).join("") +
+    `<span class="grand">Gesamtbetrag</span><span class="money grand">${fmtEur(t.brutto)}</span>`;
+  $("invPreview").innerHTML = invoiceHtml(inv);
+}
+async function saveInvoice() {
+  const D = invDraft, err = $("invFormError"); err.textContent = "";
+  try {
+    if (!D.empfaenger.trim()) throw new Error("Bitte den Rechnungsempfänger eingeben.");
+    if (!D.datum) throw new Error("Bitte ein Rechnungsdatum eingeben.");
+    const data = { datum: D.datum, leistungsdatum: D.leistungsdatum, faellig: D.faellig, empfaenger: D.empfaenger.trim(), betreff: D.betreff.trim(),
+      einleitung: D.einleitung.trim(), schlusstext: D.schlusstext.trim(), positionen: draftPositions(true), absender: D.absender, geaendert: D.geaendert };
+    if (!editingInvoiceId && !confirm(`Rechnung jetzt erstellen?\n\nSie bekommt die feste Nummer ${nextNumber(D.datum.slice(0, 4))} (oder die nächste freie).`)) return;
+    $("invSave").disabled = true;
+    const r = await api(editingInvoiceId ? "/api/rechnungen/" + editingInvoiceId : "/api/rechnungen", { method: editingInvoiceId ? "PUT" : "POST", data });
+    if ($("invSaveDefault").checked) settings = await api("/api/einstellungen/verein", { method: "PUT", data: { ...(settings.verein || {}), ...D.absender } });
+    invDraft = null; editingInvoiceId = null;
+    await reload();
+    location.hash = route(IDX("Rechnungen"));
+    viewInvoice(r.rechnung.id);
+    notice(`Rechnung ${r.rechnung.nummer} gespeichert.`, true);
+  } catch (e) { err.textContent = e.message; if ($("invSave")) $("invSave").disabled = false; }
+}
+
 /* ---------------- Ereignisse ---------------- */
-$("add").onclick = () => { const n = sections[section]; n === "Dokumente" ? editDoc() : n === "Benutzer" ? editUser() : n === "Mitglieder" ? editMember() : edit(); };
+$("add").onclick = () => {
+  const n = sections[section];
+  if (n === "Dokumente") editDoc(); else if (n === "Benutzer") editUser(); else if (n === "Mitglieder") editMember();
+  else if (n === "Downloads") editDownload(); else if (n === "Rechnungen") newInvoice(); else edit();
+};
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => b.closest("dialog").close());
 $("importJson").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) importJsonFile(f); };
 $("globalSearch").addEventListener("keydown", e => {
@@ -1037,8 +1424,15 @@ $("globalSearch").addEventListener("keydown", e => {
   $("view").innerHTML = `<div class="sectionhead"><h2>Suche: „${esc(term)}“</h2><span class="muted small">${hits.length} Treffer</span></div>` + (hits.map(r => card(r, true)).join("") || '<p class="muted">Keine Treffer.</p>');
 });
 document.addEventListener("click", async e => {
-  const b = e.target.closest("button, .day"); if (!b) return;
+  const b = e.target.closest("button, .day, a[data-act]"); if (!b) return;
   const ds = b.dataset;
+  if (b.matches("a[data-act]")) e.preventDefault();
+  if (ds.dlopen) return openDownload(ds.dlopen, false);
+  if (ds.dldl) return openDownload(ds.dldl, true);
+  if (ds.dledit) return editDownload(ds.dledit);
+  if (ds.dlnew) return editDownload(null, ds.dlnew);
+  if (ds.invview) return viewInvoice(ds.invview);
+  if (ds.delpos !== undefined) { invDraft.positionen.splice(Number(ds.delpos), 1); return renderPositions(); }
   if (ds.edit) { e.stopPropagation(); return edit(entries.find(r => r.id === ds.edit)); }
   if (ds.day) return edit(null, { datum: ds.day, bereich: "Kalender", status: "Geplant" });
   if (ds.done) return markDone(ds.done);
@@ -1054,6 +1448,14 @@ document.addEventListener("click", async e => {
   if (ds.mail) return openMail(ds.mail);
   if (ds.rsvp) return answer(ds.rsvp, ds.a);
   switch (ds.act) {
+    case "settings": return openSettings();
+    case "printMembership": return printPaper(membershipHtml(), "Aufnahmeantrag FC Sender Kickers United");
+    case "logoPng": return logoFile("png");
+    case "logoJpg": return logoFile("jpg");
+    case "logoIcon": return logoFile("icon");
+    case "newInvoice": return newInvoice();
+    case "cancelInvoice": invDraft = null; editingInvoiceId = null; location.hash = route(IDX("Rechnungen")); return;
+    case "addPos": invDraft.positionen.push({ beschreibung: "", menge: "1", einheit: "", preis: "", mwst: numDe(settings.verein?.mwst ?? "19") }); return renderPositions();
     case "importPeople": return pickPeopleFile(ds.kind);
     case "membersCsv": return exportMembersCsv();
     case "addParent": return editParent();
