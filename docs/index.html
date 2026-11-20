@@ -11,8 +11,8 @@
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta http-equiv="Cache-Control" content="no-cache">
-<link rel="stylesheet" href="style.css?v=4">
-<script src="config.js?v=4"></script>
+<link rel="stylesheet" href="style.css?v=5">
+<script src="config.js?v=5"></script>
 </head>
 <body>
 
@@ -101,6 +101,10 @@
     </div>
     <p id="visHint" class="vishint"></p>
     <label class="check"><input type="checkbox" name="rueckmeldung"> Rückmeldung erwünscht (Knöpfe „Ich nehme teil / Vielleicht / Leider nicht“)</label>
+    <div class="fields" id="trainerWrap">
+      <label class="check" style="align-self:end"><input type="checkbox" name="fuer_trainer"> 🏃 Für Trainer sichtbar</label>
+      <label>Welche Trainer?<select name="mannschaft_id"></select></label>
+    </div>
     <label>Inhalt<textarea name="inhalt" rows="8" maxlength="60000"></textarea></label>
     <label>Quelle<input name="quelle" maxlength="200"></label>
     <fieldset class="filebox">
@@ -149,9 +153,16 @@
     <div class="fields">
       <label>Benutzername<input name="benutzername" required autocapitalize="none" spellcheck="false" pattern="[a-zA-Z0-9._\-]{3,40}" title="3–40 Zeichen: a–z, 0–9, Punkt, Minus, Unterstrich"></label>
       <label>Anzeigename<input name="anzeigename" maxlength="80" placeholder="z. B. Max Mustermann"></label>
-      <label>Rolle<select name="rolle"><option value="ausschuss">Ausschuss</option><option value="vorstand">Vorstand</option></select></label>
-      <label class="check" style="align-self:end"><input type="checkbox" name="ist_admin"> Admin (Benutzerverwaltung)</label>
+      <label>Rolle<select name="rolle"><option value="ausschuss">Ausschuss</option><option value="vorstand">Vorstand</option><option value="trainer">Trainer</option></select></label>
+      <div style="align-self:end">
+        <label class="check" id="adminWrap"><input type="checkbox" name="ist_admin"> Admin (Benutzerverwaltung)</label>
+        <label class="check" id="schatzWrap"><input type="checkbox" name="ist_schatzmeister"> Schatzmeister (schreibt in der Kasse)</label>
+      </div>
     </div>
+    <fieldset class="adminblock" id="teamWrap"><legend>Mannschaften des Trainers</legend>
+      <div id="teamChecks" class="teamchecks"></div>
+      <p class="muted small">Der Trainer sieht nur Mitglieder und Eltern dieser Mannschaften und nur Termine „Für Trainer sichtbar“.</p>
+    </fieldset>
     <label class="check" id="activeWrap"><input type="checkbox" name="aktiv" checked> Konto aktiv</label>
     <label id="pwWrap">Startpasswort (mind. 10 Zeichen – wird beim ersten Login geändert)<input name="passwort" type="text" minlength="10" autocomplete="off"></label>
     <div class="actions" id="pwGen"><button type="button" class="quiet" data-act="genpw">Sicheres Passwort erzeugen</button></div>
@@ -174,7 +185,7 @@
       <label>Vorname<input name="vorname" maxlength="80"></label>
       <label>Nachname<input name="nachname" maxlength="80"></label>
       <label>Geburtsdatum<input name="geburtsdatum" type="date"></label>
-      <label>Mannschaft<input name="mannschaft" maxlength="80" list="teamList"></label>
+      <label>Mannschaft<select name="mannschaft_id"></select></label>
       <label>E-Mail<input name="email" type="email" maxlength="160"></label>
       <label>Telefon<input name="telefon" type="tel" maxlength="60"></label>
       <label>Mitglied seit<input name="eintritt" type="date"></label>
@@ -200,7 +211,7 @@
       <label>Name (Mutter/Vater)<input name="name" maxlength="120"></label>
       <label>E-Mail<input name="email" type="email" required maxlength="160"></label>
       <label>Kind<input name="kind" maxlength="120"></label>
-      <label>Mannschaft<input name="mannschaft" maxlength="80" list="teamList"></label>
+      <label>Mannschaft<select name="mannschaft_id"></select></label>
     </div>
     <label>Notiz<textarea name="notiz" rows="2" maxlength="1000"></textarea></label>
     <div id="parentError" class="err" role="alert"></div>
@@ -297,6 +308,49 @@
   </form>
 </dialog>
 
+<!-- Kasse: Buchung -->
+<dialog id="kasseEditor">
+  <form id="kasseForm">
+    <h2>Neue Buchung</h2>
+    <p class="muted small">Die Belegnummer (K-Jahr-0001 …) wird beim Speichern automatisch vergeben. Gespeicherte Buchungen können nicht mehr geändert, nur storniert werden.</p>
+    <div class="fields">
+      <label>Datum<input name="datum" type="date" required></label>
+      <label>Art<select name="art"><option value="einnahme">Einnahme</option><option value="ausgabe">Ausgabe</option></select></label>
+      <label>Betrag in €<input name="betrag" inputmode="decimal" required placeholder="0,00"></label>
+      <label>Zahlungsweg<select name="zahlungsweg"><option value="bank">Bank</option><option value="bar">Bar</option></select></label>
+      <label>Kategorie<select name="kategorie"></select></label>
+      <label>Bezug zu Rechnung (optional)<select name="rechnung_id"></select></label>
+    </div>
+    <label>Beschreibung<textarea name="beschreibung" rows="2" maxlength="1000" required placeholder="z. B. Trikotsatz U11, Sportgeschäft Muster"></textarea></label>
+    <label>Beleg (PDF/Bild, max. 10 MB, optional)<input name="beleg" type="file" accept=".pdf,image/*"></label>
+    <div id="kasseError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button id="kasseSave">Buchen</button>
+    </footer>
+  </form>
+</dialog>
+
+<!-- Kasse: Einstellungen -->
+<dialog id="kasseSettings">
+  <form id="kasseSettingsForm">
+    <h2>Kasse: Einstellungen</h2>
+    <div class="fields">
+      <label>Anfangsbestand Bar (€)<input name="anfang_bar" inputmode="decimal"></label>
+      <label>Anfangsbestand Bank (€)<input name="anfang_bank" inputmode="decimal"></label>
+      <label>Stichtag der Anfangsbestände<input name="stichtag" type="date"></label>
+    </div>
+    <p class="muted small">Kassenstand = Anfangsbestand + alle nicht stornierten Buchungen ab dem Stichtag (ohne Stichtag: alle Buchungen).</p>
+    <label>Kategorien (eine pro Zeile)<textarea name="kategorien" rows="8"></textarea></label>
+    <p class="muted small" id="kasseSettingsMeta"></p>
+    <div id="kasseSettingsError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button>Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
 <!-- Rechnung ansehen -->
 <dialog id="invoiceView" class="wide">
   <div id="invoiceViewBody"></div>
@@ -311,10 +365,10 @@
   </footer>
 </dialog>
 
-<datalist id="teamList"></datalist>
 <input id="peopleFile" type="file" accept=".csv,.txt,.tsv,.xlsx,.xlsm,.xls" hidden>
 <input id="importJson" type="file" accept=".json,application/json" hidden>
+<input id="kasseBelegFile" type="file" accept=".pdf,image/*" hidden>
 <div id="printArea"></div>
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

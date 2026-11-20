@@ -18,7 +18,10 @@ const fmtTime = iso => iso ? new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/B
 const fmtBytes = n => n < 1024 ? n+" B" : n < 1048576 ? (n/1024).toFixed(0)+" KB" : (n/1048576).toFixed(1)+" MB";
 const options = (values, sel) => values.map(v => `<option${v===sel?" selected":""}>${esc(v)}</option>`).join("");
 const badge = s => s ? `<span class="badge" data-s="${esc(s)}">${esc(s)}</span>` : "";
-const ROLE = { vorstand: "Vorstand", ausschuss: "Ausschuss" };
+const ROLE = { vorstand: "Vorstand", ausschuss: "Ausschuss", trainer: "Trainer" };
+const rightsLabel = u => [ROLE[u.rolle], u.ist_admin && "Admin", u.ist_schatzmeister && "Schatzmeister"].filter(Boolean).join(" · ");
+let teams = [], teamsUnassigned = [], kasse = { buchungen: [], einstellungen: { kategorien: [] } };
+let kFilter = { q: "", jahr: "", monat: "", kategorie: "", art: "" }, kasseFromInvoice = null;
 
 const AUSSCHUSS_GROUPS = ["Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender"];
 const vorstandOnly = bereich => !AUSSCHUSS_GROUPS.includes(bereich);
@@ -124,7 +127,8 @@ $("setupForm").onsubmit = e => { e.preventDefault(); busy(e.target, async () => 
 
 async function logout() {
   try { await api("/api/logout", { method: "POST" }); } catch {}
-  clearToken(); me = null; entries = docs = users = members = parents = downloads = invoices = []; settings = {}; invDraft = null; showLogin("Du wurdest abgemeldet.");
+  clearToken(); me = null; entries = docs = users = members = parents = downloads = invoices = teams = teamsUnassigned = []; settings = {}; invDraft = null;
+  kasse = { buchungen: [], einstellungen: { kategorien: [] } }; showLogin("Du wurdest abgemeldet.");
 }
 let idleTimer;
 function resetIdle() {
@@ -135,8 +139,11 @@ function resetIdle() {
 
 /* ---------------- App-Aufbau ---------------- */
 const isVorstand = () => me?.rolle === "vorstand";
+const isTrainer = () => me?.rolle === "trainer";
+const isSchatz = () => isVorstand() && !!me?.ist_schatzmeister;
 function buildSections() {
-  sections = ["Übersicht", ...GROUPS.filter(g => me.bereiche.includes(g)), "Mitglieder", "Downloads", "Rechnungen", "Rechnung erstellen"];
+  if (isTrainer()) { sections = ["Übersicht", "Kalender", "Mannschaften", "Elternkommunikation", "Mein Konto"]; return; }
+  sections = ["Übersicht", ...GROUPS.filter(g => me.bereiche.includes(g)), "Mitglieder", "Downloads", ...(isVorstand() ? ["Kasse"] : []), "Rechnungen", "Rechnung erstellen"];
   if (isVorstand()) sections.push("Dokumente", "Änderungsprotokoll");
   if (me.ist_admin) sections.push("Benutzer");
   sections.push("Mein Konto");
@@ -148,8 +155,8 @@ async function startApp() {
   $("authScreen").hidden = true; $("appScreen").hidden = false;
   buildSections();
   $("userName").textContent = me.anzeigename;
-  $("userRole").textContent = ROLE[me.rolle] + (me.ist_admin ? " · Admin" : "");
-  $("heroText").textContent = isVorstand() ? "Gründung, Aufgaben und Termine an einem Ort." : "Mannschaften, Termine und Elternkommunikation an einem Ort.";
+  $("userRole").textContent = rightsLabel(me);
+  $("heroText").textContent = isVorstand() ? "Gründung, Aufgaben und Termine an einem Ort." : isTrainer() ? "Deine Termine, deine Mannschaft und die Eltern an einem Ort." : "Mannschaften, Termine und Elternkommunikation an einem Ort.";
   resetIdle();
   await reload();
 }
@@ -157,9 +164,10 @@ async function reload() {
   try {
     const jobs = [api("/api/eintraege").then(r => entries = r.eintraege),
       api("/api/mitglieder").then(r => members = r.liste), api("/api/eltern").then(r => parents = r.liste),
-      api("/api/downloads").then(r => downloads = r.downloads), api("/api/rechnungen").then(r => invoices = r.rechnungen),
-      api("/api/einstellungen").then(r => settings = r)];
-    if (isVorstand()) jobs.push(api("/api/dokumente").then(r => docs = r.dokumente));
+      api("/api/mannschaften").then(r => { teams = r.mannschaften; teamsUnassigned = r.nicht_zugeordnet || []; })];
+    if (!isTrainer()) jobs.push(api("/api/downloads").then(r => downloads = r.downloads), api("/api/rechnungen").then(r => invoices = r.rechnungen),
+      api("/api/einstellungen").then(r => settings = r));
+    if (isVorstand()) jobs.push(api("/api/dokumente").then(r => docs = r.dokumente), api("/api/kasse").then(r => kasse = r));
     if (me.ist_admin) jobs.push(api("/api/benutzer").then(r => users = r.benutzer));
     await Promise.all(jobs);
     render();
@@ -172,7 +180,7 @@ function renderNav() {
   const c = {}; for (const r of entries) if (r.status !== "Erledigt") c[r.bereich] = (c[r.bereich] || 0) + 1;
   $("nav").innerHTML = sections.map((s, i) => {
     const sep = ["Mitglieder","Dokumente","Benutzer","Mein Konto"].includes(s) && !["Mitglieder","Dokumente","Benutzer"].includes(sections[i-1]) ? '<div class="navsep"></div>' : "";
-    const n = c[s] ? `<span class="count">${c[s]}</span>` : "";
+    const n = c[s] && !isTrainer() ? `<span class="count">${c[s]}</span>` : "";
     return `${sep}<a href="${route(i)}"${i===section?' aria-current="page"':""}>${esc(s)}${n}</a>`;
   }).join("");
 }
@@ -182,15 +190,16 @@ function card(r, showGroup = false) {
   const body = r.inhalt ? `<p class="body">${esc(r.inhalt)}</p>` : "";
   const parent = r.bereich === "Elternkommunikation";
   const files = (r.anhaenge || []).map(a => `<button class="quiet chip" data-att="${esc(a.id)}" title="${esc(a.dateiname)} öffnen">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>`).join("");
-  const lock = isVorstand() && vorstandOnly(r.bereich) ? ' <span class="lockmark" title="Der Ausschuss sieht diesen Eintrag nicht">🔒 nur Vorstand</span>' : "";
+  let lock = isVorstand() && vorstandOnly(r.bereich) ? ' <span class="lockmark" title="Der Ausschuss sieht diesen Eintrag nicht">🔒 nur Vorstand</span>' : "";
+  if (r.fuer_trainer && !isTrainer()) lock += ` <span class="trainermark" title="Trainer sehen diesen Eintrag">🏃 ${esc(teamName(r.mannschaft_id) || "alle Trainer")}</span>`;
   return `<article class="card">${showGroup ? `<div class="meta">${esc(r.bereich)}${lock}</div>` : ""}<div class="cardtop"><h3>${esc(r.titel)}${showGroup ? "" : lock}</h3>${badge(r.status)}</div>
     ${meta ? `<div class="meta">${meta}</div>` : ""}
     ${r.inhalt.length > 1700 ? `<details><summary>Volltext anzeigen</summary>${body}</details>` : body}
     ${files ? `<div class="attachments">${files}</div>` : ""}
     ${r.rueckmeldung ? rsvpBlock(r) : ""}
     <div class="actions">
-      <button class="quiet" data-edit="${esc(r.id)}">Bearbeiten</button>
-      ${!["Erledigt","Bestätigt"].includes(r.status) ? `<button class="quiet" data-done="${esc(r.id)}">✓ Erledigt</button>` : ""}
+      ${isTrainer() ? "" : `<button class="quiet" data-edit="${esc(r.id)}">Bearbeiten</button>`}
+      ${!isTrainer() && !["Erledigt","Bestätigt"].includes(r.status) ? `<button class="quiet" data-done="${esc(r.id)}">✓ Erledigt</button>` : ""}
       ${parent ? `<button class="quiet" data-mail="${esc(r.id)}">✉ Per E-Mail an Eltern</button><button class="quiet" data-copy="${esc(r.id)}">Text kopieren</button><a class="btnlink quiet" target="_blank" rel="noopener noreferrer" href="https://wa.me/?text=${encodeURIComponent(r.inhalt)}">Per WhatsApp teilen</a>` : ""}
     </div></article>`;
 }
@@ -223,17 +232,20 @@ function render(reset = false) {
   const next = Number(location.hash.match(/^#bereich-(\d+)$/)?.[1]) || 0;
   if (reset || next !== section) {
     filter = ""; search = ""; mFilter = { q: "", team: "", status: "" }; iFilter = { q: "", status: "", jahr: "" };
+    kFilter = { q: "", jahr: today().slice(0, 4), monat: "", kategorie: "", art: "" };
     if (sections[next] !== "Rechnung erstellen" && editingInvoiceId) { editingInvoiceId = null; invDraft = null; }
   }
   section = next < sections.length ? next : 0;
   const name = sections[section];
   $("hero").hidden = section !== 0;
   $("crumb").textContent = section ? name : "Vereinszentrale";
-  $("add").hidden = ["Änderungsprotokoll","Mein Konto","Rechnung erstellen"].includes(name);
-  $("add").textContent = { Dokumente: "＋ Dokument", Benutzer: "＋ Benutzer", Mitglieder: "＋ Mitglied", Downloads: "＋ Datei hochladen", Rechnungen: "＋ Rechnung erstellen" }[name] || "＋ Eintrag";
+  $("add").hidden = isTrainer() || ["Änderungsprotokoll","Mein Konto","Rechnung erstellen"].includes(name) || (name === "Kasse" && !isSchatz());
+  $("add").textContent = { Dokumente: "＋ Dokument", Benutzer: "＋ Benutzer", Mitglieder: "＋ Mitglied", Downloads: "＋ Datei hochladen", Rechnungen: "＋ Rechnung erstellen", Kasse: "＋ Buchung" }[name] || "＋ Eintrag";
   renderNav();
-  if (!section) renderHome();
+  if (!section) isTrainer() ? renderTrainerHome() : renderHome();
+  else if (isTrainer() && name === "Mannschaften") renderTrainerTeam();
   else if (name === "Mitglieder") renderMembers();
+  else if (name === "Kasse") renderKasse();
   else if (name === "Downloads") renderDownloads();
   else if (name === "Rechnungen") renderInvoices();
   else if (name === "Rechnung erstellen") renderInvoiceForm();
@@ -280,6 +292,31 @@ function renderHome() {
     </div>`;
 }
 
+function renderTrainerHome() {
+  const t = today();
+  const pending = entries.filter(r => r.rueckmeldung && !myAnswer(r) && (!r.datum || r.datum >= t) && r.status !== "Erledigt")
+    .sort((a,b) => (a.datum || "9999").localeCompare(b.datum || "9999"));
+  const upcoming = entries.filter(r => r.datum >= t && r.status !== "Erledigt").sort((a,b) => (a.datum+a.uhrzeit).localeCompare(b.datum+b.uhrzeit)).slice(0, 8);
+  const my = teams.map(tm => `<div class="rsvprow"><div><b>${esc(tm.name)}</b><small>${members.filter(m => m.mannschaft_id === tm.id).length} Mitglieder · ${new Set(parents.filter(p => p.mannschaft_id === tm.id).map(p => p.email)).size} Eltern-Adressen</small></div>
+    <a class="link" href="${route(IDX("Mannschaften"))}">ansehen</a></div>`).join("");
+  $("view").innerHTML = `<div class="homegrid">
+    ${pending.length ? `<section class="card warnbox"><h2>Deine Rückmeldung fehlt (${pending.length})</h2>
+      ${pending.map(r => `<div class="rsvprow"><div><b>${esc(r.titel)}</b><small>${esc([dateText(r.datum) + (r.uhrzeit ? " · " + r.uhrzeit + " Uhr" : ""), r.ort].filter(Boolean).join(" · "))}</small></div>
+        <div class="rsvpbtns">${rsvpButtons(r)}</div></div>`).join("")}</section>` : ""}
+    <section class="card"><div class="cardtop"><h2>Nächste Termine</h2><a class="link" href="${route(IDX("Kalender"))}">Kalender</a></div>${mini(upcoming, "Keine anstehenden Termine.")}</section>
+    <section class="card"><h2>Meine Mannschaft${teams.length > 1 ? "en" : ""}</h2>${my || '<p class="muted">Dir ist noch keine Mannschaft zugeordnet. Bitte beim Admin melden.</p>'}</section>
+  </div>`;
+}
+function renderTrainerTeam() {
+  $("view").innerHTML = `<div class="sectionhead"><h2>Meine Mannschaft${teams.length > 1 ? "en" : ""}</h2></div>` + (teams.map(tm => {
+    const list = members.filter(m => m.mannschaft_id === tm.id);
+    return `<h3 class="teamhead">${esc(tm.name)} <span class="muted small">${list.length} Mitglieder · ${list.filter(m => m.status === "Aktiv").length} aktiv</span></h3>
+      <div class="tablewrap"><table class="table"><thead><tr><th>Vorname</th><th>Nachname</th><th>Alter</th><th>Status</th></tr></thead><tbody>
+      ${list.map(m => `<tr><td>${esc(m.vorname)}</td><td>${esc(m.nachname)}</td><td>${m.alter ?? ""}</td><td>${m.status === "Aktiv" ? "aktiv" : `<span class="lock">${esc(m.status.toLowerCase())}</span>`}</td></tr>`).join("")
+        || '<tr><td colspan="4" class="muted">Noch keine Mitglieder in dieser Mannschaft.</td></tr>'}</tbody></table></div>`;
+  }).join("") || '<p class="muted">Dir ist noch keine Mannschaft zugeordnet. Bitte beim Admin melden.</p>');
+}
+
 function renderGroup(name) {
   const cal = name === "Kalender";
   $("view").innerHTML = `<div class="sectionhead"><h2>${esc(name)}</h2>${cal ? `<div class="filters" style="margin:0">
@@ -319,8 +356,8 @@ function renderCalendar() {
   for (let i = 0; i < 42; i++) {
     const d = new Date(start.getTime() + i * 864e5), iso = d.toISOString().slice(0,10);
     const ev = (byDay[iso] || []).sort((a,b) => a.uhrzeit.localeCompare(b.uhrzeit)).map(r => {
-      const lock = isVorstand() && vorstandOnly(r.bereich);
-      return `<button class="ev" data-s="${esc(r.status)}" data-edit="${esc(r.id)}" title="${esc(r.titel)}${lock ? " (nur Vorstand sichtbar)" : ""}">${lock ? "🔒 " : ""}${r.uhrzeit ? esc(r.uhrzeit)+" " : ""}${esc(r.titel)}</button>`;
+      const lock = isVorstand() && vorstandOnly(r.bereich), tr = r.fuer_trainer && !isTrainer();
+      return `<button class="ev" data-s="${esc(r.status)}" data-edit="${esc(r.id)}" title="${esc(r.titel)}${lock ? " (nur Vorstand sichtbar)" : ""}${tr ? " (auch für Trainer)" : ""}">${lock ? "🔒 " : ""}${tr ? "🏃 " : ""}${r.uhrzeit ? esc(r.uhrzeit)+" " : ""}${esc(r.titel)}</button>`;
     }).join("");
     cells += `<div class="day${d.getUTCMonth() !== m-1 ? " other" : ""}${iso === t ? " today" : ""}" data-day="${iso}"><span class="num">${d.getUTCDate()}</span>${ev}</div>`;
   }
@@ -341,14 +378,49 @@ function age(d) {
   const [y, m, dd] = d.split("-").map(Number), [ty, tm, td] = today().split("-").map(Number);
   return ty - y - (tm < m || (tm === m && td < dd) ? 1 : 0);
 }
+/* Mannschaftsliste */
+const normTeam = s => String(s ?? "").trim().toLowerCase().replace(/[\s-]+/g, "");
+const teamName = id => teams.find(t => t.id === id)?.name || "";
+const findTeam = name => name ? teams.find(t => normTeam(t.name) === normTeam(name)) : null;
+const teamCell = x => x.mannschaft_id ? esc(teamName(x.mannschaft_id)) : x.mannschaft ? `${esc(x.mannschaft)} <span class="unassigned" title="Steht nicht in der Mannschaftsliste">⚠ nicht zugeordnet</span>` : "";
+function teamOptions(selId, legacyText) {
+  return `<option value="">– keine –</option>` + teams.filter(t => t.aktiv || t.id === selId).map(t => `<option value="${esc(t.id)}"${t.id === selId ? " selected" : ""}>${esc(t.name)}${t.aktiv ? "" : " (inaktiv)"}</option>`).join("")
+    + (!selId && legacyText ? `<option value="__alt" selected>„${esc(legacyText)}“ (nicht zugeordnet)</option>` : "");
+}
+function teamsCard() {
+  if (!isVorstand()) return "";
+  return `<details class="card" style="margin-bottom:14px"${teams.length && !teamsUnassigned.length ? "" : " open"}><summary><b>Mannschaftsliste</b> <span class="muted small">${teams.filter(t => t.aktiv).length} aktiv${teamsUnassigned.length ? ` · ⚠ ${teamsUnassigned.length} Werte nicht zugeordnet` : ""}</span></summary>
+    <div class="tablewrap" style="margin-top:10px"><table class="table"><thead><tr><th>Mannschaft</th><th>Sortierung</th><th>Mitglieder</th><th>Eltern</th><th>Status</th><th></th></tr></thead><tbody>
+      ${teams.map(t => `<tr><td><b>${esc(t.name)}</b></td><td>${t.sortierung}</td><td>${members.filter(m => m.mannschaft_id === t.id).length}</td><td>${parents.filter(p => p.mannschaft_id === t.id).length}</td>
+        <td>${t.aktiv ? "aktiv" : '<span class="lock">inaktiv</span>'}</td><td><button class="quiet" data-teamedit="${esc(t.id)}">Ändern</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">Noch keine Mannschaften.</td></tr>'}
+    </tbody></table></div>
+    <div class="actions"><button class="quiet" data-act="addTeam">＋ Mannschaft</button></div>
+    ${teamsUnassigned.length ? `<h3 style="margin-top:16px">Nicht zugeordnet</h3><p class="muted small">Diese Mannschafts-Namen stehen bei Mitgliedern oder Eltern, aber nicht in der Liste. Ordne sie einer Mannschaft zu oder lege sie als neue Mannschaft an.</p>
+      <div class="tablewrap" style="margin-top:8px"><table class="table"><tbody>${teamsUnassigned.map((u, i) => `<tr><td><b>„${esc(u.name)}“</b> <span class="lock">${u.mitglieder} Mitglieder · ${u.eltern} Eltern</span></td>
+        <td><select data-assignsel="${i}"><option value="">Mannschaft wählen …</option>${teams.filter(t => t.aktiv).map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}</select></td>
+        <td><button class="quiet" data-assign="${i}">Zuordnen</button> <button class="quiet" data-assignnew="${i}">Als neue Mannschaft</button></td></tr>`).join("")}</tbody></table></div>` : ""}
+  </details>`;
+}
+async function teamApi(path, method, data, msg) {
+  try { await api(path, { method, data }); await reload(); notice(msg, true); }
+  catch (e) { notice(e.message); }
+}
+function editTeam(id) {
+  const t = teams.find(x => x.id === id);
+  const name = prompt(t ? "Name der Mannschaft:" : "Name der neuen Mannschaft (z. B. U11):", t?.name || ""); if (name === null || !name.trim()) return;
+  const sort = prompt("Sortierung (kleine Zahl = weiter oben):", String(t?.sortierung ?? teams.length + 1)); if (sort === null) return;
+  const aktiv = t ? confirm(`Soll „${name.trim()}“ aktiv sein?\n\nOK = aktiv · Abbrechen = inaktiv (bleibt erhalten, ist aber nicht mehr auswählbar)`) : true;
+  teamApi(t ? "/api/mannschaften/" + t.id : "/api/mannschaften", t ? "PUT" : "POST", { name: name.trim(), sortierung: Number(sort) || 0, aktiv }, "Mannschaftsliste gespeichert.");
+}
+
 function renderMembers() {
-  const teams = distinct(members.map(m => m.mannschaft));
   $("view").innerHTML = `<div class="sectionhead"><h2>Mitglieder</h2><div class="actions" style="margin:0">
       <button class="quiet" data-act="importPeople" data-kind="mitglieder">CSV/Excel-Datei hochladen</button>
       <button class="quiet" data-act="membersCsv">Als CSV exportieren</button></div></div>
+    ${teamsCard()}
     <div class="filters">
       <input id="msearch" type="search" placeholder="Name, E-Mail, Telefon …" aria-label="Mitglieder durchsuchen" value="${esc(mFilter.q)}">
-      <select id="mteam" aria-label="Mannschaft filtern"><option value="">Alle Mannschaften</option>${options(teams, mFilter.team)}</select>
+      <select id="mteam" aria-label="Mannschaft filtern"><option value="">Alle Mannschaften</option>${teams.map(t => `<option value="${esc(t.id)}"${mFilter.team === t.id ? " selected" : ""}>${esc(t.name)}</option>`).join("")}<option value="__ohne"${mFilter.team === "__ohne" ? " selected" : ""}>ohne / nicht zugeordnet</option></select>
       <select id="mstatus" aria-label="Status filtern"><option value="">Alle Status</option>${options(MEMBER_STATUSES, mFilter.status)}</select>
     </div><div id="mtable"></div>`;
   $("msearch").oninput = e => { mFilter.q = e.target.value; renderMemberTable(); };
@@ -358,7 +430,7 @@ function renderMembers() {
 }
 function filteredMembers() {
   const q = mFilter.q.trim().toLocaleLowerCase("de");
-  return members.filter(m => (!mFilter.team || m.mannschaft === mFilter.team) && (!mFilter.status || m.status === mFilter.status)
+  return members.filter(m => (!mFilter.team || (mFilter.team === "__ohne" ? !m.mannschaft_id : m.mannschaft_id === mFilter.team)) && (!mFilter.status || m.status === mFilter.status)
     && (!q || [m.vorname, m.nachname, m.email, m.telefon, m.mannschaft, m.notiz].join(" ").toLocaleLowerCase("de").includes(q)));
 }
 function renderMemberTable() {
@@ -371,7 +443,7 @@ function renderMemberTable() {
   $("mtable").innerHTML = `<p class="muted small" style="margin-bottom:8px">${list.length} von ${members.length} Mitgliedern · ${members.filter(m => m.status === "Aktiv").length} aktiv</p>
     <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Geburtsdatum</th><th>Mannschaft</th><th>E-Mail</th><th>Telefon</th><th>Status</th><th></th></tr></thead><tbody>
     ${list.map(m => `<tr><td><b>${esc(memberName(m))}</b></td><td>${m.geburtsdatum ? `${esc(dateText(m.geburtsdatum))} <span class="lock">(${age(m.geburtsdatum)})</span>` : ""}</td>
-      <td>${esc(m.mannschaft)}</td><td class="wrap">${m.email ? `<a class="link" href="mailto:${esc(m.email)}">${esc(m.email)}</a>` : ""}</td><td>${esc(m.telefon)}</td>
+      <td>${teamCell(m)}</td><td class="wrap">${m.email ? `<a class="link" href="mailto:${esc(m.email)}">${esc(m.email)}</a>` : ""}</td><td>${esc(m.telefon)}</td>
       <td>${m.status === "Aktiv" ? "aktiv" : `<span class="lock">${esc(m.status.toLowerCase())}</span>`}</td>
       <td><button class="quiet" data-memberedit="${esc(m.id)}">Bearbeiten</button></td></tr>`).join("") || '<tr><td colspan="7" class="muted">Keine Treffer.</td></tr>'}
     </tbody></table></div>`;
@@ -385,15 +457,16 @@ function exportMembersCsv() {
 
 /* ---------------- Eltern-Verteiler ---------------- */
 function parentsPanel() {
-  const rows = parents.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.kind)}</td><td>${esc(p.mannschaft)}</td><td class="wrap">${esc(p.email)}</td>
-    <td><button class="quiet" data-parentedit="${esc(p.id)}">Bearbeiten</button></td></tr>`).join("");
-  return `<section class="card parentsbox"><div class="cardtop"><h3>Eltern-Verteiler <span class="muted small">${parents.length} ${parents.length === 1 ? "Adresse" : "Adressen"}</span></h3>
-      <div class="actions" style="margin:0"><button class="quiet" data-act="addParent">＋ Eltern</button>
-      <button class="quiet" data-act="importPeople" data-kind="eltern">CSV/Excel-Datei hochladen</button>
+  const ro = isTrainer();
+  const rows = parents.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.kind)}</td><td>${ro ? esc(teamName(p.mannschaft_id) || p.mannschaft) : teamCell(p)}</td><td class="wrap">${esc(p.email)}</td>
+    <td>${ro ? "" : `<button class="quiet" data-parentedit="${esc(p.id)}">Bearbeiten</button>`}</td></tr>`).join("");
+  return `<section class="card parentsbox"><div class="cardtop"><h3>Eltern-Verteiler${ro ? " meiner Mannschaft" + (teams.length > 1 ? "en" : "") : ""} <span class="muted small">${parents.length} ${parents.length === 1 ? "Adresse" : "Adressen"}</span></h3>
+      <div class="actions" style="margin:0">${ro ? "" : `<button class="quiet" data-act="addParent">＋ Eltern</button>
+      <button class="quiet" data-act="importPeople" data-kind="eltern">CSV/Excel-Datei hochladen</button>`}
       ${parents.length ? '<button class="quiet" data-act="mailAll">✉ E-Mail an Eltern</button>' : ""}</div></div>
     ${parents.length ? `<details${parents.length <= 8 ? " open" : ""}><summary>Liste anzeigen</summary><div class="tablewrap" style="margin-top:8px"><table class="table">
       <thead><tr><th>Name</th><th>Kind</th><th>Mannschaft</th><th>E-Mail</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></details>`
-      : '<p class="muted small" style="margin-top:8px">Noch keine Eltern eingetragen. Füge Adressen einzeln hinzu oder lade eine CSV/Excel-Liste hoch.</p>'}
+      : `<p class="muted small" style="margin-top:8px">${ro ? "Für deine Mannschaft sind noch keine Eltern-Adressen hinterlegt." : "Noch keine Eltern eingetragen. Füge Adressen einzeln hinzu oder lade eine CSV/Excel-Liste hoch."}</p>`}
   </section>`;
 }
 
@@ -419,9 +492,13 @@ async function renderLog() {
 }
 
 function renderUsers() {
-  const roleBadge = u => `<span class="rolebadge${u.rolle === "ausschuss" ? " aus" : ""}">${ROLE[u.rolle]}</span>${u.ist_admin ? ' <span class="rolebadge adm">Admin</span>' : ""}`;
+  const roleBadge = u => `<span class="rolebadge${u.rolle === "ausschuss" ? " aus" : u.rolle === "trainer" ? " tr" : ""}">${ROLE[u.rolle]}</span>${u.ist_admin ? ' <span class="rolebadge adm">Admin</span>' : ""}`
+    + (u.rolle === "vorstand" ? ` <button class="rolebadge sch${u.ist_schatzmeister ? "" : " off"}" data-schatz="${esc(u.id)}" title="Klicken: Schatzmeister-Recht ${u.ist_schatzmeister ? "entziehen" : "geben"}">${u.ist_schatzmeister ? "Schatzmeister" : "+ Schatzmeister"}</button>` : "")
+    + (u.rolle === "trainer" ? `<div class="lock">${esc((u.mannschaften || []).map(teamName).filter(Boolean).join(", ") || "keine Mannschaft")}</div>` : "");
   $("view").innerHTML = `<div class="sectionhead"><h2>Benutzer</h2><span class="muted small">${users.length} Konten</span></div>
-    <p class="muted" style="margin-bottom:14px;max-width:80ch"><b>Vorstand</b> sieht und bearbeitet alles. <b>Ausschuss</b> sieht und bearbeitet nur ${esc([...AUSSCHUSS_GROUPS, "Mitglieder"].join(", "))} und darf nichts löschen. <b>Admin</b> verwaltet zusätzlich die Benutzer.</p>
+    <p class="muted" style="margin-bottom:14px;max-width:80ch"><b>Vorstand</b> sieht und bearbeitet alles. <b>Ausschuss</b> sieht und bearbeitet nur ${esc([...AUSSCHUSS_GROUPS, "Mitglieder"].join(", "))} und darf nichts löschen.
+      <b>Trainer</b> sieht nur Termine „Für Trainer sichtbar“, die Mitglieder (ohne Geburtsdatum, Telefon, Notiz) und Eltern seiner Mannschaft(en) – nur lesen.
+      Zusatzrechte für den Vorstand: <b>Admin</b> verwaltet die Benutzer, <b>Schatzmeister</b> schreibt in der Kasse.</p>
     <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Benutzername</th><th>Rolle</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead><tbody>
     ${users.map(u => `<tr><td><b>${esc(u.anzeigename)}</b></td><td>${esc(u.benutzername)}</td><td>${roleBadge(u)}</td><td class="lock">${esc(u.letzter_login ? fmtTime(u.letzter_login) : "noch nie")}</td>
       <td>${u.aktiv ? (u.pw_aendern ? '<span class="lock">wartet auf 1. Login</span>' : "aktiv") : '<span class="lock">deaktiviert</span>'}</td>
@@ -433,12 +510,12 @@ function renderAccount() {
   $("view").innerHTML = `<div class="sectionhead"><h2>Mein Konto</h2></div>
     <div class="optgrid">
       <section class="card"><h2>${esc(me.anzeigename)}</h2>
-        <dl class="kv"><dt>Benutzername</dt><dd>${esc(me.benutzername)}</dd><dt>Rolle</dt><dd>${ROLE[me.rolle]}${me.ist_admin ? " · Admin" : ""}</dd>
-        <dt>Bereiche</dt><dd>${esc(me.bereiche.join(", "))}</dd><dt>Angemeldet</dt><dd>${store() === localStorage ? "dauerhaft auf diesem Gerät" : `bis zum Schließen des Browsers (Abmeldung nach ${IDLE_MINUTES} Min. Inaktivität)`}</dd></dl>
+        <dl class="kv"><dt>Benutzername</dt><dd>${esc(me.benutzername)}</dd><dt>Rolle</dt><dd>${esc(rightsLabel(me))}</dd>
+        <dt>${isTrainer() ? "Mannschaften" : "Bereiche"}</dt><dd>${esc(isTrainer() ? teams.map(t => t.name).join(", ") || "keine" : me.bereiche.join(", "))}</dd><dt>Angemeldet</dt><dd>${store() === localStorage ? "dauerhaft auf diesem Gerät" : `bis zum Schließen des Browsers (Abmeldung nach ${IDLE_MINUTES} Min. Inaktivität)`}</dd></dl>
         <div class="actions"><button class="quiet" data-act="changepw">Passwort ändern</button><button class="quiet" data-act="logout">Abmelden</button></div></section>
       <section class="card"><h2>Export</h2>
-        <p>Termine für den Handy-Kalender${isVorstand() ? ", Einträge als Excel-Tabelle und eine komplette Sicherung als JSON" : " und Einträge als Excel-Tabelle"}.</p>
-        <div class="actions"><button class="quiet" data-act="ics">Termine (.ics)</button><button class="quiet" data-act="csv">Einträge (CSV)</button>
+        <p>Termine für den Handy-Kalender${isVorstand() ? ", Einträge als Excel-Tabelle und eine komplette Sicherung als JSON" : isTrainer() ? "" : " und Einträge als Excel-Tabelle"}.</p>
+        <div class="actions"><button class="quiet" data-act="ics">Termine (.ics)</button>${isTrainer() ? "" : '<button class="quiet" data-act="csv">Einträge (CSV)</button>'}
         ${isVorstand() ? '<button class="quiet" data-act="exportJson">Sicherung (JSON)</button><button class="quiet" data-act="importJson">JSON importieren</button>' : ""}</div></section>
     </div>`;
 }
@@ -476,22 +553,42 @@ async function importJsonFile(file) {
   let data; try { data = JSON.parse(await file.text()); } catch { return notice("JSON-Datei konnte nicht gelesen werden."); }
   const list = data.eintraege || data.records || (Array.isArray(data) ? data : null);
   if (!Array.isArray(list)) return notice("Keine Einträge in der Datei gefunden.");
-  const extra = [["mitglieder", "Mitglieder"], ["eltern", "Eltern-Adressen"]].filter(([k]) => Array.isArray(data[k]) && data[k].length);
-  if (!confirm(`${list.length} Einträge als neue Einträge importieren?${extra.map(([k, l]) => `\nDazu ${data[k].length} ${l} (Doppelte werden übersprungen).`).join("")}`)) return;
-  for (const [k] of extra) {
+  const arr = k => Array.isArray(data[k]) ? data[k] : [];
+  const extra = [["mitglieder", "Mitglieder"], ["eltern", "Eltern-Adressen"], ["mannschaften", "Mannschaften"]].filter(([k]) => arr(k).length);
+  const restore = [["rechnungen", "Rechnungen", invoices.length], ...(isSchatz() ? [["kassenbuchungen", "Kassenbuchungen", kasse.buchungen.length]] : [])].filter(([k]) => arr(k).length);
+  if (!confirm(`${list.length} Einträge als neue Einträge importieren?${extra.map(([k, l]) => `\nDazu ${arr(k).length} ${l} (Doppelte werden übersprungen).`).join("")}`
+    + restore.map(([k, l, have]) => `\n${arr(k).length} ${l}: ${have ? "werden übersprungen (feste Nummern, die Liste ist nicht leer)" : "werden wiederhergestellt (mit ihren Nummern)"}.`).join("")
+    + (arr("downloads").length || arr("anhaenge").length ? "\nDateien (Downloads, Anhänge, Belege) sind nicht in der Sicherung und werden nicht übernommen." : "")
+    + (arr("benutzer").length ? "\nKonten werden nicht angelegt (Passwörter sind nicht in der Sicherung)." : ""))) return;
+  const msgs = [];
+  // 1. Mannschaften zuerst, damit Einträge/Mitglieder/Eltern zugeordnet werden können (alte ID → neue ID über den Namen)
+  const oldTeams = {};
+  for (const t of arr("mannschaften")) oldTeams[t.id] = t.name;
+  if (arr("mannschaften").length && isVorstand())
+    try { const r = await api("/api/mannschaften/import", { method: "POST", data: { liste: arr("mannschaften").map(t => ({ name: t.name, sortierung: t.sortierung, aktiv: !!t.aktiv })) } }); teams = r.mannschaften; msgs.push(`${r.neu} Mannschaften`); } catch (e) { msgs.push(e.message); }
+  const mapTeam = id => findTeam(oldTeams[id])?.id || "";
+  for (const k of ["mitglieder", "eltern"]) {
     const keys = k === "mitglieder" ? MEMBER_KEYS : PARENT_KEYS;
-    for (let i = 0; i < data[k].length; i += MAX_IMPORT)
-      try { await api(`/api/${k}/import`, { method: "POST", data: { liste: data[k].slice(i, i + MAX_IMPORT).map(x => Object.fromEntries(keys.map(f => [f, x[f] ?? ""]))), datei: file.name } }); } catch (e) { notice(e.message); }
+    for (let i = 0; i < arr(k).length; i += MAX_IMPORT)
+      try { await api(`/api/${k}/import`, { method: "POST", data: { liste: arr(k).slice(i, i + MAX_IMPORT).map(x => ({ ...Object.fromEntries(keys.map(f => [f, x[f] ?? ""])), mannschaft_id: mapTeam(x.mannschaft_id) })), datei: file.name } }); } catch (e) { msgs.push(e.message); }
   }
+  for (const [k, , have] of restore) {
+    if (have) continue;
+    try { const r = await api(k === "rechnungen" ? "/api/rechnungen/wiederherstellen" : "/api/kasse/wiederherstellen", { method: "POST", data: { liste: arr(k), datei: file.name } }); msgs.push(`${r.anzahl} ${k === "rechnungen" ? "Rechnungen" : "Kassenbuchungen"}`); }
+    catch (e) { msgs.push(e.message); }
+  }
+  if (isSchatz() && data.kasse_einstellungen && !kasse.buchungen.length)
+    try { await api("/api/kasse/einstellungen", { method: "PUT", data: data.kasse_einstellungen }); } catch (e) { msgs.push(e.message); }
   let n = 0;
   for (const r of list) {
     const v = { titel: r.titel ?? r.title, bereich: GROUPS.includes(r.bereich ?? r.group) ? (r.bereich ?? r.group) : "Offene Entscheidungen",
       status: STATUSES.includes(r.status) ? r.status : "Offen", datum: r.datum ?? r.date ?? "", uhrzeit: r.uhrzeit ?? "", ort: r.ort ?? "",
-      zustaendig: r.zustaendig ?? r.owner ?? "", inhalt: r.inhalt ?? r.body ?? "", quelle: r.quelle ?? r.source ?? "Import" };
+      zustaendig: r.zustaendig ?? r.owner ?? "", inhalt: r.inhalt ?? r.body ?? "", quelle: r.quelle ?? r.source ?? "Import",
+      rueckmeldung: !!r.rueckmeldung, fuer_trainer: !!r.fuer_trainer, mannschaft_id: mapTeam(r.mannschaft_id) };
     if (!v.titel) continue;
     try { await api("/api/eintraege", { method: "POST", data: v }); n++; } catch {}
   }
-  notice(`${n} Einträge importiert.`, true); reload();
+  notice(`${n} Einträge importiert${msgs.length ? " · " + msgs.join(" · ") : ""}.`, true); reload();
 }
 
 /* ---------------- Tabellen lesen (CSV + Excel .xlsx, ohne fremde Bibliothek) ---------------- */
@@ -674,8 +771,15 @@ function sheetToMembers(t) {
       email: email.slice(0, 160), telefon: cellOf(r, map.telefon).slice(0, 60), eintritt: ein || "", status: st || "Aktiv",
       notiz: notes.filter(Boolean).join("\n").slice(0, 2000) };
   }).filter(Boolean);
-  return { list, skipped, info: columnInfo(t.headers, map, MEMBER_LABELS), extra: extra.map(i => t.headers[i]),
-    cols: [["Name", m => memberName(m)], ["Geburtsdatum", m => dateText(m.geburtsdatum)], ["Mannschaft", m => m.mannschaft], ["E-Mail", m => m.email], ["Telefon", m => m.telefon]] };
+  return withTeams({ list, skipped, info: columnInfo(t.headers, map, MEMBER_LABELS), extra: extra.map(i => t.headers[i]),
+    cols: [["Name", m => memberName(m)], ["Geburtsdatum", m => dateText(m.geburtsdatum)], ["Mannschaft", teamPreview], ["E-Mail", m => m.email], ["Telefon", m => m.telefon]] });
+}
+// Mannschaft über den Namen zuordnen (ohne Groß/klein, Leerzeichen, Bindestriche); Unbekanntes markieren
+const teamPreview = x => x.mannschaft_id ? teamName(x.mannschaft_id) : x.mannschaft ? `${x.mannschaft} ⚠ unbekannt` : "";
+function withTeams(res) {
+  for (const x of res.list) { const t = findTeam(x.mannschaft); x.mannschaft_id = t?.id || ""; if (t) x.mannschaft = t.name; }
+  res.unknownTeams = distinct(res.list.filter(x => x.mannschaft && !x.mannschaft_id).map(x => x.mannschaft));
+  return res;
 }
 
 const PARENT_ALIASES = {
@@ -700,8 +804,8 @@ function sheetToParents(t) {
     const notiz = [cellOf(r, map.notiz), extraText(r, t.headers, extra)].filter(Boolean).join("\n").slice(0, 1000);
     for (const email of ok) list.push({ name: cellOf(r, map.name).slice(0, 120), email: email.toLowerCase().slice(0, 160), kind: cellOf(r, map.kind).slice(0, 120), mannschaft: cellOf(r, map.mannschaft).slice(0, 80), notiz });
   });
-  return { list, skipped, info: columnInfo(t.headers, map, PARENT_LABELS), extra: extra.map(i => t.headers[i]),
-    cols: [["Name", p => p.name], ["E-Mail", p => p.email], ["Kind", p => p.kind], ["Mannschaft", p => p.mannschaft]] };
+  return withTeams({ list, skipped, info: columnInfo(t.headers, map, PARENT_LABELS), extra: extra.map(i => t.headers[i]),
+    cols: [["Name", p => p.name], ["E-Mail", p => p.email], ["Kind", p => p.kind], ["Mannschaft", teamPreview]] });
 }
 
 /* ---------------- Mitglieder/Eltern importieren ---------------- */
@@ -722,6 +826,7 @@ $("peopleFile").onchange = async e => {
       <ul><li>Erkannte Spalten: ${res.info || "keine"}</li>
       ${res.extra.length ? `<li>Weitere Spalten kommen in die Notiz: ${res.extra.map(h => `„${esc(h)}“`).join(", ")}</li>` : ""}
       ${res.skipped.length ? `<li>Übersprungen: ${res.skipped.length} Zeilen (${esc(res.skipped.slice(0, 4).join("; "))}${res.skipped.length > 4 ? " …" : ""})</li>` : ""}
+      ${res.unknownTeams.length ? `<li class="unassigned">⚠ Unbekannte Mannschaft${res.unknownTeams.length > 1 ? "en" : ""}: ${res.unknownTeams.map(x => `„${esc(x)}“`).join(", ")} – werden übernommen, aber als „nicht zugeordnet“ markiert. ${isVorstand() ? "Du kannst sie danach in der Mannschaftsliste zuordnen." : "Der Vorstand kann sie in der Mannschaftsliste zuordnen."}</li>` : ""}
       <li>Wer schon in der Liste steht, wird nicht doppelt angelegt.</li></ul>
       ${res.list.length ? `<div class="tablewrap"><table class="table"><thead><tr>${res.cols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead><tbody>
         ${res.list.slice(0, 8).map(x => `<tr>${res.cols.map(c => `<td>${esc(c[1](x))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
@@ -751,30 +856,47 @@ $("importForm").onsubmit = async e => {
 const form = $("form"), editor = $("editor"), field = n => form.elements.namedItem(n);
 const FIELDS = ["titel","bereich","status","datum","uhrzeit","ort","zustaendig","inhalt","quelle"];
 function edit(rec, preset = {}) {
+  if (isTrainer() && !rec) return;   // Trainer legt keine Einträge an
+  const ro = isTrainer();            // Trainer: nur ansehen
   activeId = rec?.id || null;
-  $("formTitle").textContent = activeId ? "Eintrag bearbeiten" : "Eintrag anlegen";
-  $("remove").hidden = !activeId || !me.darf_loeschen; $("duplicate").hidden = !activeId;
+  $("formTitle").textContent = ro ? "Termin" : activeId ? "Eintrag bearbeiten" : "Eintrag anlegen";
+  $("remove").hidden = ro || !activeId || !me.darf_loeschen; $("duplicate").hidden = ro || !activeId; $("save").hidden = ro;
   $("error").textContent = "";
-  const cur = sections[section];
-  field("bereich").innerHTML = options(me.bereiche, rec?.bereich || preset.bereich || (me.bereiche.includes(cur) ? cur : me.bereiche[0]));
+  const cur = sections[section], allowed = ro ? [rec.bereich] : me.bereiche;
+  field("bereich").innerHTML = options(allowed, rec?.bereich || preset.bereich || (allowed.includes(cur) ? cur : allowed[0]));
   field("status").innerHTML = options(STATUSES, rec?.status || preset.status || (cur === "Kalender" ? "Geplant" : "Offen"));
   for (const k of ["titel","datum","uhrzeit","ort","zustaendig","inhalt","quelle"]) field(k).value = rec?.[k] ?? preset[k] ?? "";
   field("rueckmeldung").checked = rec ? !!rec.rueckmeldung : preset.rueckmeldung !== undefined ? !!preset.rueckmeldung : field("bereich").value === "Kalender";
+  field("fuer_trainer").checked = !!(rec ? rec.fuer_trainer : preset.fuer_trainer);
+  const tid = (rec ? rec.mannschaft_id : preset.mannschaft_id) || "";
+  field("mannschaft_id").innerHTML = `<option value="">Alle Trainer</option>` + teams.filter(t => t.aktiv || t.id === tid).map(t => `<option value="${esc(t.id)}"${t.id === tid ? " selected" : ""}>Nur Trainer von ${esc(t.name)}</option>`).join("");
+  for (const el of form.elements) if (el.name && el.type !== "button") el.disabled = ro;
+  $("trainerWrap").hidden = ro;
   updateVisHint();
   $("formMeta").textContent = rec ? `Zuletzt geändert ${fmtTime(rec.geaendert)} von ${rec.geaendert_von}` : "";
   field("datei").value = ""; pendingSheet = null; $("importBox").hidden = true; $("importBox").innerHTML = "";
+  field("datei").closest("fieldset").hidden = ro && !(rec?.anhaenge || []).length;
   renderAttachList(rec);
-  editor.showModal(); field("titel").focus();
+  editor.showModal(); if (!ro) field("titel").focus();
 }
 function updateVisHint() {
   const h = $("visHint"), b = field("bereich").value;
-  if (!isVorstand()) { h.textContent = ""; return; }
+  // Trainer-Häkchen nur in Bereichen, die nicht nur für den Vorstand sind
+  const trOk = !vorstandOnly(b);
+  if (!trOk) field("fuer_trainer").checked = false;
+  field("fuer_trainer").disabled = !trOk || isTrainer();
+  field("mannschaft_id").disabled = !field("fuer_trainer").checked || isTrainer();
+  if (isTrainer()) { h.textContent = ""; return; }
+  const tr = field("fuer_trainer").checked ? ` 🏃 ${field("mannschaft_id").value ? "Trainer von " + teamName(field("mannschaft_id").value) : "Alle Trainer"} sehen ihn auch.` : " Trainer sehen ihn nicht.";
+  if (!isVorstand()) { h.className = "vishint"; h.textContent = `👥 Vorstand und Ausschuss sehen diesen Eintrag.${tr}`; return; }
   h.className = "vishint" + (vorstandOnly(b) ? " vorstand" : "");
   h.textContent = vorstandOnly(b)
     ? `🔒 Nur der Vorstand sieht diesen Eintrag. Soll der Ausschuss ihn auch sehen, wähle z. B. den Bereich „Kalender“.`
-    : `👥 Vorstand und Ausschuss sehen diesen Eintrag.`;
+    : `👥 Vorstand und Ausschuss sehen diesen Eintrag.${tr}`;
 }
 field("bereich").addEventListener("change", updateVisHint);
+field("fuer_trainer").addEventListener("change", updateVisHint);
+field("mannschaft_id").addEventListener("change", updateVisHint);
 function renderAttachList(rec) {
   $("attachList").innerHTML = (rec?.anhaenge || []).map(a => `<span><button type="button" class="quiet chip" data-att="${esc(a.id)}">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>${me.darf_loeschen ? `<button type="button" class="quiet danger chip" data-attdel="${esc(a.id)}" aria-label="${esc(a.dateiname)} löschen">✕</button>` : ""}</span>`).join("");
 }
@@ -836,6 +958,7 @@ form.onsubmit = async e => {
   e.preventDefault();
   const v = Object.fromEntries(FIELDS.map(k => [k, String(field(k).value || "").trim()]));
   v.rueckmeldung = field("rueckmeldung").checked;
+  v.fuer_trainer = field("fuer_trainer").checked; v.mannschaft_id = v.fuer_trainer ? field("mannschaft_id").value : "";
   const file = field("datei").files[0];
   $("save").disabled = true; $("error").textContent = "";
   try {
@@ -909,18 +1032,37 @@ function editUser(id) {
   $("userFormTitle").textContent = u ? "Benutzer bearbeiten" : "Benutzer anlegen";
   ufield("benutzername").value = u?.benutzername || ""; ufield("benutzername").disabled = !!u;
   ufield("anzeigename").value = u?.anzeigename || ""; ufield("rolle").value = u?.rolle || "ausschuss";
-  ufield("ist_admin").checked = !!u?.ist_admin; ufield("aktiv").checked = u ? u.aktiv : true;
+  ufield("ist_admin").checked = !!u?.ist_admin; ufield("ist_schatzmeister").checked = !!u?.ist_schatzmeister; ufield("aktiv").checked = u ? u.aktiv : true;
   ufield("passwort").value = u ? "" : genPassword(); ufield("passwort").required = !u;
   $("pwWrap").hidden = $("pwGen").hidden = !!u; $("activeWrap").hidden = !u;
   $("userRemove").hidden = $("userReset").hidden = !u || u.id === me.id;
+  const mine = u?.mannschaften || [];
+  $("teamChecks").innerHTML = teams.filter(t => t.aktiv || mine.includes(t.id)).map(t => `<label class="check"><input type="checkbox" data-team="${esc(t.id)}"${mine.includes(t.id) ? " checked" : ""}> ${esc(t.name)}</label>`).join("")
+    || '<p class="muted small">Noch keine Mannschaften angelegt (Mitglieder → Mannschaftsliste).</p>';
   $("userError").textContent = ""; syncAdminBox();
   userEditor.showModal();
 }
-function syncAdminBox() { const v = ufield("rolle").value === "vorstand"; ufield("ist_admin").disabled = !v; if (!v) ufield("ist_admin").checked = false; }
+// Admin/Schatzmeister nur für Vorstand, Mannschaften nur für Trainer
+function syncAdminBox() {
+  const r = ufield("rolle").value, v = r === "vorstand";
+  for (const k of ["ist_admin", "ist_schatzmeister"]) { ufield(k).disabled = !v; if (!v) ufield(k).checked = false; }
+  $("adminWrap").hidden = $("schatzWrap").hidden = !v; $("teamWrap").hidden = r !== "trainer";
+}
 ufield("rolle").onchange = syncAdminBox;
+async function toggleSchatz(id) {
+  const u = users.find(x => x.id === id); if (!u) return;
+  if (!confirm(`${u.anzeigename}: Schatzmeister-Recht ${u.ist_schatzmeister ? "entziehen" : "geben"}?`)) return;
+  try { users = (await api("/api/benutzer/" + id, { method: "PUT", data: { ist_schatzmeister: !u.ist_schatzmeister } })).benutzer;
+    if (id === me.id) { me = (await api("/api/ich")).benutzer; $("userRole").textContent = rightsLabel(me); await reload(); } else render();
+    notice(`Schatzmeister-Recht ${u.ist_schatzmeister ? "entzogen" : "gegeben"}.`, true); }
+  catch (e) { notice(e.message); }
+}
 userForm.onsubmit = async e => {
   e.preventDefault(); $("userError").textContent = "";
-  const data = { anzeigename: ufield("anzeigename").value.trim(), rolle: ufield("rolle").value, ist_admin: ufield("ist_admin").checked, aktiv: ufield("aktiv").checked };
+  const data = { anzeigename: ufield("anzeigename").value.trim(), rolle: ufield("rolle").value, ist_admin: ufield("ist_admin").checked,
+    ist_schatzmeister: ufield("ist_schatzmeister").checked, aktiv: ufield("aktiv").checked,
+    mannschaften: [...$("teamChecks").querySelectorAll("[data-team]:checked")].map(x => x.dataset.team) };
+  if (data.rolle === "trainer" && !data.mannschaften.length && !confirm("Diesem Trainer ist keine Mannschaft zugeordnet. Er sieht dann keine Mitglieder und Eltern. Trotzdem speichern?")) return;
   try {
     if (activeUserId) users = (await api("/api/benutzer/" + activeUserId, { method: "PUT", data })).benutzer;
     else {
@@ -929,7 +1071,8 @@ userForm.onsubmit = async e => {
       users = (await api("/api/benutzer", { method: "POST", data: { ...data, benutzername: name, passwort: await clientHash(name, pw) } })).benutzer;
       alert(`Konto angelegt.\n\nBenutzername: ${name}\nStartpasswort: ${pw}\n\nBitte persönlich oder per Telefon weitergeben – nicht per E-Mail. Beim ersten Login muss ein eigenes Passwort gesetzt werden.`);
     }
-    userEditor.close(); notice("Benutzer gespeichert.", true); render();
+    userEditor.close(); notice("Benutzer gespeichert.", true);
+    if (activeUserId === me.id) { me = (await api("/api/ich")).benutzer; $("userRole").textContent = rightsLabel(me); buildSections(); await reload(); } else render();
   } catch (err) { $("userError").textContent = err.message; }
 };
 $("userReset").onclick = async () => {
@@ -948,21 +1091,29 @@ $("userRemove").onclick = async () => {
 };
 
 /* ---------------- Mitglied / Eltern bearbeiten ---------------- */
-function fillTeams() { $("teamList").innerHTML = distinct([...members.map(m => m.mannschaft), ...parents.map(p => p.mannschaft)]).map(t => `<option value="${esc(t)}">`).join(""); }
+// Mannschafts-Auswahl → {mannschaft_id, mannschaft}; „__alt“ = alten, nicht zugeordneten Text behalten
+function teamFromSelect(sel, old) {
+  const v = sel.value;
+  if (v === "__alt") return { mannschaft_id: "", mannschaft: old?.mannschaft || "" };
+  return { mannschaft_id: v, mannschaft: teamName(v) };
+}
 const memberForm = $("memberForm"), mfield = n => memberForm.elements.namedItem(n);
-const MEMBER_KEYS = ["vorname","nachname","geburtsdatum","mannschaft","email","telefon","eintritt","status","notiz"];
+const MEMBER_KEYS = ["vorname","nachname","geburtsdatum","mannschaft","mannschaft_id","email","telefon","eintritt","status","notiz"];
+const MEMBER_INPUTS = ["vorname","nachname","geburtsdatum","email","telefon","eintritt","notiz"];
 function editMember(id) {
   activeMemberId = id || null; const m = members.find(x => x.id === id);
   $("memberFormTitle").textContent = m ? memberName(m) : "Mitglied anlegen";
   $("memberHint").hidden = !!m; $("memberRemove").hidden = !m || !me.darf_loeschen; $("memberError").textContent = "";
   mfield("status").innerHTML = options(MEMBER_STATUSES, m?.status || "Aktiv");
-  for (const k of MEMBER_KEYS) if (k !== "status") mfield(k).value = m?.[k] ?? "";
+  for (const k of MEMBER_INPUTS) mfield(k).value = m?.[k] ?? "";
+  mfield("mannschaft_id").innerHTML = teamOptions(m?.mannschaft_id || "", m?.mannschaft_id ? "" : m?.mannschaft);
   $("memberMeta").textContent = m ? `Zuletzt geändert ${fmtTime(m.geaendert)} von ${m.geaendert_von}` : "";
-  fillTeams(); $("memberEditor").showModal(); mfield("vorname").focus();
+  $("memberEditor").showModal(); mfield("vorname").focus();
 }
 memberForm.onsubmit = async e => {
   e.preventDefault(); $("memberError").textContent = "";
-  const data = Object.fromEntries(MEMBER_KEYS.map(k => [k, String(mfield(k).value || "").trim()]));
+  const data = { ...Object.fromEntries([...MEMBER_INPUTS, "status"].map(k => [k, String(mfield(k).value || "").trim()])),
+    ...teamFromSelect(mfield("mannschaft_id"), members.find(x => x.id === activeMemberId)) };
   if (!data.vorname && !data.nachname) { $("memberError").textContent = "Bitte Vor- oder Nachnamen eingeben."; return; }
   try {
     const old = members.find(x => x.id === activeMemberId);
@@ -978,17 +1129,21 @@ $("memberRemove").onclick = async () => {
 };
 
 const parentForm = $("parentForm"), pfield = n => parentForm.elements.namedItem(n);
-const PARENT_KEYS = ["name","email","kind","mannschaft","notiz"];
+const PARENT_KEYS = ["name","email","kind","mannschaft","mannschaft_id","notiz"];
+const PARENT_INPUTS = ["name","email","kind","notiz"];
 function editParent(id) {
+  if (isTrainer()) return;
   activeParentId = id || null; const p = parents.find(x => x.id === id);
   $("parentFormTitle").textContent = p ? "Eltern bearbeiten" : "Eltern hinzufügen";
   $("parentHint").hidden = !!p; $("parentRemove").hidden = !p || !me.darf_loeschen; $("parentError").textContent = "";
-  for (const k of PARENT_KEYS) pfield(k).value = p?.[k] ?? "";
-  fillTeams(); $("parentEditor").showModal(); pfield("name").focus();
+  for (const k of PARENT_INPUTS) pfield(k).value = p?.[k] ?? "";
+  pfield("mannschaft_id").innerHTML = teamOptions(p?.mannschaft_id || "", p?.mannschaft_id ? "" : p?.mannschaft);
+  $("parentEditor").showModal(); pfield("name").focus();
 }
 parentForm.onsubmit = async e => {
   e.preventDefault(); $("parentError").textContent = "";
-  const data = Object.fromEntries(PARENT_KEYS.map(k => [k, String(pfield(k).value || "").trim()]));
+  const data = { ...Object.fromEntries(PARENT_INPUTS.map(k => [k, String(pfield(k).value || "").trim()])),
+    ...teamFromSelect(pfield("mannschaft_id"), parents.find(x => x.id === activeParentId)) };
   if (!EMAIL_RE.test(data.email)) { $("parentError").textContent = "Bitte eine gültige E-Mail-Adresse eingeben."; return; }
   if (!activeParentId && parents.some(p => p.email.toLowerCase() === data.email.toLowerCase()) && !confirm(`${data.email} steht schon im Verteiler. Trotzdem noch einmal eintragen?`)) return;
   try {
@@ -1006,14 +1161,17 @@ $("parentRemove").onclick = async () => {
 
 /* ---------------- E-Mail an Eltern (über das eigene E-Mail-Programm, alle im BCC) ---------------- */
 const mailForm = $("mailForm"), xfield = n => mailForm.elements.namedItem(n);
-const recipients = () => { const t = xfield("mannschaft").value; return [...new Set(parents.filter(p => !t || p.mannschaft === t).map(p => p.email.toLowerCase()))]; };
+// Gruppen-Schlüssel: Mannschaft aus der Liste, sonst der alte Freitext
+const mailKey = p => p.mannschaft_id || (p.mannschaft ? "txt:" + p.mannschaft : "");
+const recipients = () => { const t = xfield("mannschaft").value; return [...new Set(parents.filter(p => !t || mailKey(p) === t).map(p => p.email.toLowerCase()))]; };
 function updateMailCount() { const n = recipients().length; $("mailCount").textContent = n ? `${n} Empfänger` : "Keine Empfänger für diese Auswahl."; }
 function openMail(entryId) {
-  if (!parents.length) return notice("Im Eltern-Verteiler stehen noch keine Adressen. Füge sie oben bei „Eltern-Verteiler“ hinzu.");
+  if (!parents.length) return notice(isTrainer() ? "Für deine Mannschaft sind noch keine Eltern-Adressen hinterlegt." : "Im Eltern-Verteiler stehen noch keine Adressen. Füge sie oben bei „Eltern-Verteiler“ hinzu.");
   const r = entries.find(x => x.id === entryId);
-  const teams = distinct(parents.map(p => p.mannschaft));
-  xfield("mannschaft").innerHTML = `<option value="">Alle Eltern (${new Set(parents.map(p => p.email.toLowerCase())).size})</option>` +
-    teams.map(t => `<option value="${esc(t)}">Nur ${esc(t)} (${new Set(parents.filter(p => p.mannschaft === t).map(p => p.email.toLowerCase())).size})</option>`).join("");
+  const groups = [...new Set(parents.map(mailKey).filter(Boolean))].map(k => [k, k.startsWith("txt:") ? k.slice(4) + " (nicht zugeordnet)" : teamName(k)]).sort((a, b) => a[1].localeCompare(b[1], "de"));
+  const count = k => new Set(parents.filter(p => mailKey(p) === k).map(p => p.email.toLowerCase())).size;
+  xfield("mannschaft").innerHTML = `<option value="">${isTrainer() ? "Alle meine Eltern" : "Alle Eltern"} (${new Set(parents.map(p => p.email.toLowerCase())).size})</option>` +
+    groups.map(([k, label]) => `<option value="${esc(k)}">Nur ${esc(label)} (${count(k)})</option>`).join("");
   xfield("betreff").value = r ? r.titel : ""; xfield("text").value = r ? r.inhalt : "";
   $("mailError").textContent = ""; updateMailCount(); $("mailDialog").showModal();
 }
@@ -1271,6 +1429,12 @@ async function setInvoiceStatus(status) {
   try {
     await api(`/api/rechnungen/${raw.id}/status`, { method: "POST", data: { status, bezahlt_am } });
     await reload(); viewInvoice(raw.id); notice(`Rechnung ${raw.nummer}: ${status}.`, true);
+    // Schatzmeister: nachfragen, ob die Zahlung in die Kasse gebucht werden soll (nie automatisch)
+    if (status === "Bezahlt" && isSchatz() && confirm(`Rechnung ${raw.nummer} ist bezahlt.\n\nSoll dafür jetzt eine Einnahme in der Kasse gebucht werden (${fmtEur(raw.brutto)}, Bank)?`)) {
+      $("invoiceView").close();
+      newBooking({ art: "einnahme", betrag: raw.brutto, datum: bezahlt_am, zahlungsweg: "bank", rechnung_id: raw.id,
+        kategorie: KS().kategorien.includes("Sponsoring") ? "Sponsoring" : undefined, beschreibung: `Zahlung Rechnung ${raw.nummer} · ${raw.empfaenger.split("\n")[0]}` });
+    }
   } catch (e) { $("invoiceError").textContent = e.message; }
 }
 $("invPrint").onclick = () => { const raw = invoices.find(i => i.id === viewInvoiceId); if (raw) printPaper(invoiceHtml(parseInv(raw)), `Rechnung ${raw.nummer}`); };
@@ -1409,10 +1573,151 @@ async function saveInvoice() {
   } catch (e) { err.textContent = e.message; if ($("invSave")) $("invSave").disabled = false; }
 }
 
+/* ---------------- Kasse (Vorstand liest, nur Schatzmeister schreibt) ---------------- */
+const KS = () => kasse.einstellungen || { kategorien: [] };
+const signed = b => (b.art === "einnahme" ? 1 : -1) * b.betrag;
+function kasseStand() {
+  const s = KS(), from = s.stichtag || "";
+  const live = kasse.buchungen.filter(b => !b.storniert && b.datum >= from);
+  const sum = weg => live.filter(b => b.zahlungsweg === weg).reduce((a, b) => a + signed(b), 0);
+  return { bar: (s.anfang_bar || 0) + sum("bar"), bank: (s.anfang_bank || 0) + sum("bank") };
+}
+function filteredBookings() {
+  const q = kFilter.q.trim().toLocaleLowerCase("de");
+  return kasse.buchungen.filter(b => (!kFilter.jahr || b.datum.startsWith(kFilter.jahr)) && (!kFilter.monat || b.datum.slice(5, 7) === kFilter.monat)
+    && (!kFilter.kategorie || b.kategorie === kFilter.kategorie) && (!kFilter.art || b.art === kFilter.art)
+    && (!q || [b.belegnr, b.beschreibung, b.kategorie, b.rechnung_nr, b.storno_grund].join(" ").toLocaleLowerCase("de").includes(q)));
+}
+function renderKasse() {
+  const y = today().slice(0, 4), st = kasseStand();
+  const yearLive = kasse.buchungen.filter(b => !b.storniert && b.datum.startsWith(y));
+  const ein = yearLive.filter(b => b.art === "einnahme").reduce((a, b) => a + b.betrag, 0), aus = yearLive.filter(b => b.art === "ausgabe").reduce((a, b) => a + b.betrag, 0);
+  const years = distinct([y, ...kasse.buchungen.map(b => b.datum.slice(0, 4))]).reverse();
+  const months = ["01","02","03","04","05","06","07","08","09","10","11","12"], mName = m => new Intl.DateTimeFormat("de-DE", { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(2000, Number(m) - 1, 1)));
+  $("view").innerHTML = `<div class="sectionhead"><h2>Kasse</h2><div class="actions" style="margin:0">
+      ${isSchatz() ? '<button class="quiet" data-act="kasseSettings">Einstellungen</button>' : ""}<button class="quiet" data-act="kasseCsv">CSV ${esc(kFilter.jahr || "alle Jahre")}</button></div></div>
+    ${isSchatz() ? "" : '<p class="muted small" style="margin-bottom:12px">Nur lesen – buchen und stornieren darf nur der Schatzmeister.</p>'}
+    <div class="stats">
+      <div class="stat"><strong>${fmtEur(st.bar)}</strong>Kassenstand Bar</div>
+      <div class="stat"><strong>${fmtEur(st.bank)}</strong>Kontostand Bank</div>
+      <div class="stat"><strong class="k-in">${fmtEur(ein)}</strong>Einnahmen ${y}</div>
+      <div class="stat"><strong class="k-out">${fmtEur(aus)}</strong>Ausgaben ${y}</div>
+    </div>
+    <div class="filters">
+      <input id="ksearch" type="search" placeholder="Belegnr., Beschreibung, Rechnung …" aria-label="Buchungen durchsuchen" value="${esc(kFilter.q)}">
+      <select id="kjahr" aria-label="Jahr"><option value="">Alle Jahre</option>${options(years, kFilter.jahr)}</select>
+      <select id="kmonat" aria-label="Monat"><option value="">Alle Monate</option>${months.map(m => `<option value="${m}"${kFilter.monat === m ? " selected" : ""}>${mName(m)}</option>`).join("")}</select>
+      <select id="kkat" aria-label="Kategorie"><option value="">Alle Kategorien</option>${options(distinct([...KS().kategorien, ...kasse.buchungen.map(b => b.kategorie)]), kFilter.kategorie)}</select>
+      <select id="kart" aria-label="Art"><option value="">Einnahmen und Ausgaben</option><option value="einnahme"${kFilter.art === "einnahme" ? " selected" : ""}>Nur Einnahmen</option><option value="ausgabe"${kFilter.art === "ausgabe" ? " selected" : ""}>Nur Ausgaben</option></select>
+    </div><div id="ktable"></div>`;
+  for (const [id, k] of [["kjahr","jahr"],["kmonat","monat"],["kkat","kategorie"],["kart","art"]]) $(id).onchange = e => { kFilter[k] = e.target.value; renderKasseTable(); };
+  $("ksearch").oninput = e => { kFilter.q = e.target.value; renderKasseTable(); };
+  renderKasseTable();
+}
+function renderKasseTable() {
+  const list = filteredBookings();
+  const live = list.filter(b => !b.storniert), saldo = live.reduce((a, b) => a + signed(b), 0);
+  $("ktable").innerHTML = !kasse.buchungen.length
+    ? `<section class="card"><h3>Noch keine Buchungen</h3><p class="muted" style="margin-top:6px">${isSchatz() ? "Trage zuerst unter <b>Einstellungen</b> die Anfangsbestände ein, dann über <b>＋ Buchung</b> die erste Einnahme oder Ausgabe." : "Der Schatzmeister hat noch nichts gebucht."}</p></section>`
+    : `<p class="muted small" style="margin-bottom:8px">${list.length} Buchungen · Saldo der Auswahl (ohne Stornos): <b>${fmtEur(saldo)}</b></p>
+    <div class="tablewrap"><table class="table"><thead><tr><th>Beleg</th><th>Datum</th><th>Beschreibung</th><th>Kategorie</th><th>Weg</th><th class="money">Betrag</th><th></th></tr></thead><tbody>
+    ${list.map(b => `<tr class="${b.storniert ? "storno" : ""}"><td style="white-space:nowrap"><b>${esc(b.belegnr)}</b></td><td>${esc(dateText(b.datum))}</td>
+      <td>${esc(b.beschreibung)}${b.rechnung_nr ? `<div class="lock">Rechnung ${esc(b.rechnung_nr)}</div>` : ""}${b.storniert ? `<div class="lock">Storniert ${esc(fmtTime(b.storno_am))} von ${esc(b.storno_von)}: ${esc(b.storno_grund)}</div>` : ""}
+        ${(b.belege || []).map(x => `<button class="quiet chip" data-beleg="${esc(x.id)}">📎 ${esc(x.dateiname)}</button>`).join(" ")}</td>
+      <td>${esc(b.kategorie)}</td><td>${b.zahlungsweg === "bar" ? "Bar" : "Bank"}</td>
+      <td class="money ${b.art === "einnahme" ? "k-in" : "k-out"}">${b.art === "einnahme" ? "+" : "−"} ${fmtEur(b.betrag)}</td>
+      <td style="white-space:nowrap">${isSchatz() ? `<button class="quiet" data-kbeleg="${esc(b.id)}" title="Beleg anhängen">📎</button>${b.storniert ? "" : ` <button class="quiet danger" data-kstorno="${esc(b.id)}">Storno</button>`}` : ""}</td></tr>`).join("")
+      || '<tr><td colspan="7" class="muted">Keine Treffer.</td></tr>'}
+    </tbody></table></div>`;
+}
+const kasseForm = $("kasseForm"), kfield = n => kasseForm.elements.namedItem(n);
+function newBooking(preset = {}) {
+  if (!isSchatz()) return;
+  kasseFromInvoice = preset.rechnung_id || null;
+  kfield("datum").value = preset.datum || today(); kfield("art").value = preset.art || "einnahme";
+  kfield("betrag").value = preset.betrag ? numDe((preset.betrag / 100).toFixed(2)) : ""; kfield("zahlungsweg").value = preset.zahlungsweg || "bank";
+  const kats = KS().kategorien;
+  kfield("kategorie").innerHTML = options(kats, preset.kategorie && kats.includes(preset.kategorie) ? preset.kategorie : kats[0]);
+  kfield("rechnung_id").innerHTML = `<option value="">– keine –</option>` + invoices.filter(i => i.status !== "Storniert").map(i => `<option value="${esc(i.id)}"${i.id === preset.rechnung_id ? " selected" : ""}>${esc(i.nummer)} · ${esc(i.empfaenger.split("\n")[0])} · ${fmtEur(i.brutto)}</option>`).join("");
+  kfield("beschreibung").value = preset.beschreibung || ""; kfield("beleg").value = ""; $("kasseError").textContent = "";
+  $("kasseEditor").showModal();
+}
+kasseForm.onsubmit = async e => {
+  e.preventDefault(); $("kasseError").textContent = "";
+  const betrag = Math.round(parseDe(kfield("betrag").value) * 100), file = kfield("beleg").files[0];
+  if (!Number.isFinite(betrag) || betrag <= 0) { $("kasseError").textContent = "Bitte einen Betrag größer als 0 eingeben (z. B. 49,90)."; return; }
+  if (file && file.size > MAX_FILE) { $("kasseError").textContent = "Beleg zu groß (max. 10 MB)."; return; }
+  const data = { datum: kfield("datum").value, art: kfield("art").value, betrag, zahlungsweg: kfield("zahlungsweg").value, kategorie: kfield("kategorie").value,
+    rechnung_id: kfield("rechnung_id").value, beschreibung: kfield("beschreibung").value.trim() };
+  $("kasseSave").disabled = true;
+  try {
+    let r;
+    try { r = await api("/api/kasse", { method: "POST", data }); }
+    catch (err) {
+      if (!/gibt es schon die Buchung/.test(err.message) || !confirm(err.message + "\n\nTrotzdem noch einmal buchen?")) throw err;
+      r = await api("/api/kasse", { method: "POST", data: { ...data, trotzdem: true } });
+    }
+    if (file) await api(`/api/kasse/${r.buchung.id}/belege`, { method: "POST", raw: file, headers: { "Content-Type": file.type || "application/octet-stream", "X-Dateiname": encodeURIComponent(file.name) } });
+    $("kasseEditor").close(); kasseFromInvoice = null; await reload(); notice(`Gebucht: ${r.buchung.belegnr}.`, true);
+  } catch (err) { $("kasseError").textContent = err.message; }
+  finally { $("kasseSave").disabled = false; }
+};
+async function stornoBooking(id) {
+  const b = kasse.buchungen.find(x => x.id === id); if (!b) return;
+  const grund = prompt(`Buchung ${b.belegnr} (${fmtEur(b.betrag)}) stornieren?\n\nDie Buchung bleibt mit ihrer Nummer sichtbar, zählt aber nicht mehr mit. Bitte den Grund eingeben:`);
+  if (grund === null) return;
+  if (!grund.trim()) return notice("Ohne Grund kann nicht storniert werden.");
+  try { kasse = await api(`/api/kasse/${id}/storno`, { method: "POST", data: { grund: grund.trim() } }); render(); notice(`${b.belegnr} storniert.`, true); }
+  catch (e) { notice(e.message); }
+}
+let belegFor = null;
+$("kasseBelegFile").onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ""; if (!f || !belegFor) return;
+  if (f.size > MAX_FILE) return notice("Beleg zu groß (max. 10 MB).");
+  try { await api(`/api/kasse/${belegFor}/belege`, { method: "POST", raw: f, headers: { "Content-Type": f.type || "application/octet-stream", "X-Dateiname": encodeURIComponent(f.name) } }); await reload(); notice("Beleg angehängt.", true); }
+  catch (err) { notice(err.message); }
+};
+async function openBeleg(id) {
+  const x = kasse.buchungen.flatMap(b => b.belege || []).find(b => b.id === id); if (!x) return;
+  const win = window.open("", "_blank");
+  try {
+    const blob = new Blob([await api(`/api/kasse/belege/${id}`, { blob: true })], { type: x.mime || "application/octet-stream" });
+    if (win && /^(application\/pdf|image\/)/.test(x.mime)) { const url = URL.createObjectURL(blob); win.location = url; setTimeout(() => URL.revokeObjectURL(url), 120000); }
+    else { if (win) win.close(); download(blob, x.dateiname); }
+  } catch (e) { if (win) win.close(); notice(e.message); }
+}
+function exportKasseCsv() {
+  const list = [...filteredBookings()].sort((a, b) => (a.datum + a.belegnr).localeCompare(b.datum + b.belegnr));
+  const cell = v => `"${String(v ?? "").replace(/"/g, '""')}"`, eur = c => (c / 100).toFixed(2).replace(".", ",");
+  const head = ["Belegnr.","Datum","Art","Betrag","Einnahme","Ausgabe","Kategorie","Zahlungsweg","Beschreibung","Rechnung","Storniert","Storno-Grund","Beleg-Dateien","Erstellt von"];
+  const rows = list.map(b => [b.belegnr, dateText(b.datum), b.art === "einnahme" ? "Einnahme" : "Ausgabe", eur(signed(b)), b.art === "einnahme" ? eur(b.betrag) : "", b.art === "ausgabe" ? eur(b.betrag) : "",
+    b.kategorie, b.zahlungsweg === "bar" ? "Bar" : "Bank", b.beschreibung, b.rechnung_nr, b.storniert ? "ja" : "", b.storno_grund, (b.belege || []).map(x => x.dateiname).join(", "), b.erstellt_von].map(cell).join(";"));
+  download(new Blob(["﻿" + [head.join(";"), ...rows].join("\r\n")], { type: "text/csv;charset=utf-8" }), `kassenbuch_${kFilter.jahr || "alle"}_${today()}.csv`);
+}
+const ksForm = $("kasseSettingsForm"), ksfield = n => ksForm.elements.namedItem(n);
+function openKasseSettings() {
+  const s = KS();
+  ksfield("anfang_bar").value = numDe(((s.anfang_bar || 0) / 100).toFixed(2)); ksfield("anfang_bank").value = numDe(((s.anfang_bank || 0) / 100).toFixed(2));
+  ksfield("stichtag").value = s.stichtag || ""; ksfield("kategorien").value = (s.kategorien || []).join("\n");
+  $("kasseSettingsMeta").textContent = s.geaendert ? `Zuletzt geändert ${fmtTime(s.geaendert)} von ${s.geaendert_von}` : "";
+  $("kasseSettingsError").textContent = ""; $("kasseSettings").showModal();
+}
+ksForm.onsubmit = async e => {
+  e.preventDefault();
+  const c = v => { const n = parseDe(v || "0"); return Math.round((Number.isFinite(n) ? n : NaN) * 100); };
+  const data = { anfang_bar: c(ksfield("anfang_bar").value), anfang_bank: c(ksfield("anfang_bank").value), stichtag: ksfield("stichtag").value,
+    kategorien: ksfield("kategorien").value.split("\n").map(s => s.trim()).filter(Boolean) };
+  if (!Number.isFinite(data.anfang_bar) || !Number.isFinite(data.anfang_bank)) { $("kasseSettingsError").textContent = "Anfangsbestand ist keine Zahl (z. B. 150,00)."; return; }
+  try { kasse = await api("/api/kasse/einstellungen", { method: "PUT", data }); $("kasseSettings").close(); render(); notice("Kasse: Einstellungen gespeichert.", true); }
+  catch (err) { $("kasseSettingsError").textContent = err.message; }
+};
+
 /* ---------------- Ereignisse ---------------- */
 $("add").onclick = () => {
   const n = sections[section];
-  if (n === "Dokumente") editDoc(); else if (n === "Benutzer") editUser(); else if (n === "Mitglieder") editMember();
+  if (isTrainer()) return;
+  if (n === "Kasse") newBooking();
+  else if (n === "Dokumente") editDoc(); else if (n === "Benutzer") editUser(); else if (n === "Mitglieder") editMember();
   else if (n === "Downloads") editDownload(); else if (n === "Rechnungen") newInvoice(); else edit();
 };
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => b.closest("dialog").close());
@@ -1432,6 +1737,24 @@ document.addEventListener("click", async e => {
   if (ds.dledit) return editDownload(ds.dledit);
   if (ds.dlnew) return editDownload(null, ds.dlnew);
   if (ds.invview) return viewInvoice(ds.invview);
+  if (ds.schatz) return toggleSchatz(ds.schatz);
+  if (ds.teamedit) return editTeam(ds.teamedit);
+  if (ds.beleg) return openBeleg(ds.beleg);
+  if (ds.kbeleg) { belegFor = ds.kbeleg; return $("kasseBelegFile").click(); }
+  if (ds.kstorno) return stornoBooking(ds.kstorno);
+  if (ds.assign !== undefined || ds.assignnew !== undefined) {
+    const u = teamsUnassigned[Number(ds.assign ?? ds.assignnew)]; if (!u) return;
+    if (ds.assignnew !== undefined) {
+      if (!confirm(`„${u.name}“ als neue Mannschaft anlegen und alle ${u.mitglieder + u.eltern} Einträge zuordnen?`)) return;
+      try { const r = await api("/api/mannschaften", { method: "POST", data: { name: u.name, sortierung: teams.length + 1, aktiv: true } });
+        const t = r.mannschaften.find(x => normTeam(x.name) === normTeam(u.name));
+        return teamApi("/api/mannschaften/zuordnen", "POST", { text: u.name, mannschaft_id: t.id }, `„${u.name}“ angelegt und zugeordnet.`); }
+      catch (e) { return notice(e.message); }
+    }
+    const sel = document.querySelector(`[data-assignsel="${ds.assign}"]`);
+    if (!sel?.value) return notice("Bitte zuerst eine Mannschaft auswählen.");
+    return teamApi("/api/mannschaften/zuordnen", "POST", { text: u.name, mannschaft_id: sel.value }, `„${u.name}“ → ${teamName(sel.value)} zugeordnet.`);
+  }
   if (ds.delpos !== undefined) { invDraft.positionen.splice(Number(ds.delpos), 1); return renderPositions(); }
   if (ds.edit) { e.stopPropagation(); return edit(entries.find(r => r.id === ds.edit)); }
   if (ds.day) return edit(null, { datum: ds.day, bereich: "Kalender", status: "Geplant" });
@@ -1449,6 +1772,9 @@ document.addEventListener("click", async e => {
   if (ds.rsvp) return answer(ds.rsvp, ds.a);
   switch (ds.act) {
     case "settings": return openSettings();
+    case "addTeam": return editTeam(null);
+    case "kasseSettings": return openKasseSettings();
+    case "kasseCsv": return exportKasseCsv();
     case "printMembership": return printPaper(membershipHtml(), "Aufnahmeantrag FC Sender Kickers United");
     case "logoPng": return logoFile("png");
     case "logoJpg": return logoFile("jpg");

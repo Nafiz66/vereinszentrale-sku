@@ -2,9 +2,12 @@
  * Vereinszentrale · FC Sender Kickers United – API (Cloudflare Worker + D1/SQLite)
  *
  * Rollen
- *   vorstand  – darf alles lesen und ändern (Einträge, Dokumente, Protokoll, Export)
+ *   vorstand  – darf alles lesen und ändern (Einträge, Dokumente, Protokoll, Export, Kasse lesen)
  *   ausschuss – liest/bearbeitet nur die freigegebenen Bereiche, darf nicht löschen
- *   ist_admin – zusätzlich Benutzerverwaltung (nur Admins legen Benutzer an)
+ *   trainer   – sieht nur Einträge „Für Trainer sichtbar“ (ggf. nur seiner Mannschaft) sowie
+ *               Mitglieder/Eltern seiner Mannschaft(en) – nur lesen, sagt zu/ab
+ *   ist_admin – Zusatz für Vorstand: Benutzerverwaltung (nur Admins legen Benutzer an)
+ *   ist_schatzmeister – Zusatz für Vorstand: schreibt in der Kasse
  *
  * Passwörter
  *   Der Browser streckt das Passwort mit PBKDF2 (250.000 Runden, Salt = Benutzername).
@@ -19,15 +22,17 @@ const SERVER_ITER = 10000;
 const SESSION_HOURS = 12, SESSION_HOURS_LONG = 24 * 30;
 const MAX_FAILS = 5, LOCK_MINUTES = 15;
 const MAX_FILE = 10 * 1024 * 1024, CHUNK = 1024 * 1024;
-const ENTRY_FIELDS = ["titel","bereich","status","datum","uhrzeit","ort","zustaendig","inhalt","quelle","rueckmeldung"];
+const ENTRY_FIELDS = ["titel","bereich","status","datum","uhrzeit","ort","zustaendig","inhalt","quelle","rueckmeldung","fuer_trainer","mannschaft_id"];
+const ROLES = ["vorstand","ausschuss","trainer"];
+const KASSE_DEFAULTS = { kategorien: ["Mitgliedsbeiträge","Sponsoring","Spenden","Sportmaterial","Platz/Hallen","Fahrtkosten","Sonstiges"], anfang_bar: 0, anfang_bank: 0, stichtag: "" };
 const ANSWERS = { ja: "Nimmt teil", vielleicht: "Vielleicht", nein: "Nimmt nicht teil" };
 const LIMITS = { titel: 160, ort: 120, zustaendig: 120, inhalt: 60000, quelle: 200 };
 const MAX_IMPORT = 1000;
-const MEMBER_FIELDS = ["vorname","nachname","geburtsdatum","mannschaft","email","telefon","eintritt","status","notiz"];
-const MEMBER_LIMITS = { vorname: 80, nachname: 80, geburtsdatum: 10, mannschaft: 80, email: 160, telefon: 60, eintritt: 10, status: 30, notiz: 2000 };
+const MEMBER_FIELDS = ["vorname","nachname","geburtsdatum","mannschaft","mannschaft_id","email","telefon","eintritt","status","notiz"];
+const MEMBER_LIMITS = { vorname: 80, nachname: 80, geburtsdatum: 10, mannschaft: 80, mannschaft_id: 60, email: 160, telefon: 60, eintritt: 10, status: 30, notiz: 2000 };
 const MEMBER_STATUSES = ["Aktiv","Passiv","Ausgetreten"];
-const PARENT_FIELDS = ["name","email","kind","mannschaft","notiz"];
-const PARENT_LIMITS = { name: 120, email: 160, kind: 120, mannschaft: 80, notiz: 1000 };
+const PARENT_FIELDS = ["name","email","kind","mannschaft","mannschaft_id","notiz"];
+const PARENT_LIMITS = { name: 120, email: 160, kind: 120, mannschaft: 80, mannschaft_id: 60, notiz: 1000 };
 const EMAIL_RE = /^[^\s@,;<>"]+@[^\s@,;<>"]+\.[^\s@,;<>"]+$/;
 const DL_CATS = ["Formulare","Sponsoren","Logos & Werbematerial","Sonstiges"];
 // Vereinsdaten (Absender auf Rechnungen und Formularen) – alles frei änderbar außer Vereinsname, Logo, Rechnungsnummer
@@ -111,14 +116,31 @@ async function body(req) {
 
 /* ---------------- Rechte ---------------- */
 const isVorstand = u => u.rolle === "vorstand";
-const canSeeGroup = (u, g) => isVorstand(u) || AUSSCHUSS_GROUPS.includes(g);
+const isTrainer = u => u.rolle === "trainer";
+const isSchatzmeister = u => isVorstand(u) && !!u.ist_schatzmeister;
+// Bereiche schreiben/lesen: Vorstand alle, Ausschuss seine fünf, Trainer keinen (er sieht nur freigegebene Einträge)
+const canSeeGroup = (u, g) => isVorstand(u) || (u.rolle === "ausschuss" && AUSSCHUSS_GROUPS.includes(g));
+// Einen einzelnen Eintrag sehen (für Liste, Anhänge, Zusagen, „noch offen“)
+function canSeeEntry(u, e) {
+  if (isTrainer(u)) return !!e.fuer_trainer && AUSSCHUSS_GROUPS.includes(e.bereich) && (!e.mannschaft_id || (u.teams || []).includes(e.mannschaft_id));
+  return canSeeGroup(u, e.bereich);
+}
 function needVorstand(u) { if (!isVorstand(u)) fail(403, "Nur für den Vorstand."); }
 function needAdmin(u) { if (!u.ist_admin) fail(403, "Nur für Admins."); }
+function needNotTrainer(u) { if (isTrainer(u)) fail(403, "Für Trainer nicht freigegeben."); }
+function needSchatzmeister(u) { if (!isSchatzmeister(u)) fail(403, "Nur für den Schatzmeister."); }
 function publicUser(u) {
   return { id: u.id, benutzername: u.benutzername, anzeigename: u.anzeigename, rolle: u.rolle, ist_admin: !!u.ist_admin,
-    aktiv: !!u.aktiv, pw_aendern: !!u.pw_aendern, letzter_login: u.letzter_login, erstellt: u.erstellt,
-    bereiche: isVorstand(u) ? GROUPS : AUSSCHUSS_GROUPS, darf_loeschen: isVorstand(u) };
+    ist_schatzmeister: !!u.ist_schatzmeister, aktiv: !!u.aktiv, pw_aendern: !!u.pw_aendern, letzter_login: u.letzter_login, erstellt: u.erstellt,
+    bereiche: isVorstand(u) ? GROUPS : isTrainer(u) ? [] : AUSSCHUSS_GROUPS, darf_loeschen: isVorstand(u),
+    ...(u.teams ? { mannschaften: u.teams } : {}) };
 }
+async function trainerTeams(env, id) {
+  const { results } = await env.DB.prepare("SELECT mannschaft_id FROM trainer_mannschaften WHERE benutzer_id=?").bind(id).all();
+  return results.map(r => r.mannschaft_id);
+}
+const normTeam = s => String(s ?? "").trim().toLowerCase().replace(/[\s-]+/g, "");
+async function teamList(env) { return (await env.DB.prepare("SELECT * FROM mannschaften ORDER BY sortierung, name").all()).results; }
 
 async function log(env, user, aktion, titel, details = "") {
   await env.DB.prepare("INSERT INTO protokoll(zeit,benutzer,aktion,titel,details) VALUES(?,?,?,?,?)")
@@ -206,26 +228,31 @@ async function changeOwnPassword(req, env, u) {
 
 /* ---- Einträge ---- */
 async function listEntries(env, u) {
+  // Vorstand/Ausschuss: nach Bereich; Trainer: nur „Für Trainer sichtbar“ (genauer Filter danach mit canSeeEntry)
   const groups = isVorstand(u) ? GROUPS : AUSSCHUSS_GROUPS;
   const ph = groups.map(() => "?").join(",");
-  const [e, a, z, b] = await env.DB.batch([
-    env.DB.prepare(`SELECT * FROM eintraege WHERE bereich IN (${ph}) ORDER BY datum, uhrzeit, titel`).bind(...groups),
+  const where = `e.bereich IN (${ph})${isTrainer(u) ? " AND e.fuer_trainer=1" : ""}`;
+  const [e, a, z, b, tm] = await env.DB.batch([
+    env.DB.prepare(`SELECT * FROM eintraege e WHERE ${where} ORDER BY datum, uhrzeit, titel`).bind(...groups),
     env.DB.prepare(`SELECT a.id, a.eintrag_id, a.dateiname, a.mime, a.groesse, a.erstellt, a.erstellt_von FROM anhaenge a
-      JOIN eintraege e ON e.id=a.eintrag_id WHERE e.bereich IN (${ph}) ORDER BY a.erstellt`).bind(...groups),
+      JOIN eintraege e ON e.id=a.eintrag_id WHERE ${where} ORDER BY a.erstellt`).bind(...groups),
     env.DB.prepare(`SELECT z.eintrag_id, z.benutzer_id, z.antwort, z.geaendert, b.anzeigename FROM zusagen z
-      JOIN eintraege e ON e.id=z.eintrag_id JOIN benutzer b ON b.id=z.benutzer_id WHERE e.bereich IN (${ph}) ORDER BY b.anzeigename`).bind(...groups),
+      JOIN eintraege e ON e.id=z.eintrag_id JOIN benutzer b ON b.id=z.benutzer_id WHERE ${where} ORDER BY b.anzeigename`).bind(...groups),
     env.DB.prepare("SELECT id, anzeigename, rolle FROM benutzer WHERE aktiv=1 ORDER BY anzeigename"),
+    env.DB.prepare("SELECT benutzer_id, mannschaft_id FROM trainer_mannschaften"),
   ]);
-  const files = {}, answers = {};
+  const files = {}, answers = {}, teams = {};
   for (const x of a.results) (files[x.eintrag_id] ||= []).push(x);
   for (const x of z.results) (answers[x.eintrag_id] ||= []).push({ benutzer_id: x.benutzer_id, name: x.anzeigename, antwort: x.antwort, geaendert: x.geaendert });
-  return { eintraege: e.results.map(r => {
+  for (const x of tm.results) (teams[x.benutzer_id] ||= []).push(x.mannschaft_id);
+  const people = b.results.map(x => ({ ...x, teams: teams[x.id] || [] }));
+  return { eintraege: e.results.filter(r => canSeeEntry(u, r)).map(r => {
     const out = { ...r, anhaenge: files[r.id] || [] };
     if (r.rueckmeldung) {
       out.zusagen = answers[r.id] || [];
       const done = new Set(out.zusagen.map(x => x.benutzer_id));
-      // Wer den Eintrag sehen kann und noch nicht geantwortet hat
-      out.offen = b.results.filter(x => !done.has(x.id) && canSeeGroup(x, r.bereich)).map(x => x.anzeigename);
+      // Nur wer den Eintrag wirklich sehen darf und noch nicht geantwortet hat
+      out.offen = people.filter(x => !done.has(x.id) && canSeeEntry(x, r)).map(x => x.anzeigename);
     }
     return out;
   }) };
@@ -233,8 +260,7 @@ async function listEntries(env, u) {
 async function answerEntry(req, env, u, id) {
   const b = await body(req);
   const e = await visibleEntry(env, u, id);
-  const full = await env.DB.prepare("SELECT rueckmeldung FROM eintraege WHERE id=?").bind(id).first();
-  if (!full.rueckmeldung) fail(400, "Für diesen Eintrag ist keine Rückmeldung vorgesehen.");
+  if (!e.rueckmeldung) fail(400, "Für diesen Eintrag ist keine Rückmeldung vorgesehen.");
   const antwort = String(b.antwort ?? "");
   if (antwort && !ANSWERS[antwort]) fail(400, "Ungültige Antwort.");
   if (antwort) await env.DB.prepare(`INSERT INTO zusagen(eintrag_id,benutzer_id,antwort,geaendert) VALUES(?,?,?,?)
@@ -245,8 +271,12 @@ async function answerEntry(req, env, u, id) {
 }
 function readEntry(b, u) {
   const v = {};
-  for (const k of ENTRY_FIELDS) v[k] = clean(b[k], LIMITS[k] || 40);
-  v.rueckmeldung = b.rueckmeldung === true || b.rueckmeldung === 1 || b.rueckmeldung === "1" ? 1 : 0;
+  for (const k of ENTRY_FIELDS) v[k] = clean(b[k], LIMITS[k] || 60);
+  const yes = x => x === true || x === 1 || x === "1";
+  v.rueckmeldung = yes(b.rueckmeldung) ? 1 : 0;
+  // Vorstands-Bereiche bleiben immer vor Trainern verborgen
+  v.fuer_trainer = yes(b.fuer_trainer) && AUSSCHUSS_GROUPS.includes(v.bereich) ? 1 : 0;
+  if (!v.fuer_trainer) v.mannschaft_id = "";
   if (!v.titel) fail(400, "Bitte einen Titel eingeben.");
   if (!GROUPS.includes(v.bereich)) fail(400, "Unbekannter Bereich.");
   if (!STATUSES.includes(v.status)) fail(400, "Unbekannter Status.");
@@ -254,8 +284,12 @@ function readEntry(b, u) {
   if (!canSeeGroup(u, v.bereich)) fail(403, "Für diesen Bereich hast du keine Berechtigung.");
   return v;
 }
+async function checkTeam(env, id) {
+  if (id && !(await env.DB.prepare("SELECT id FROM mannschaften WHERE id=?").bind(id).first())) fail(400, "Unbekannte Mannschaft.");
+}
 async function createEntry(req, env, u) {
   const v = readEntry(await body(req), u), t = nowIso(), id = uid();
+  await checkTeam(env, v.mannschaft_id);
   await env.DB.prepare(`INSERT INTO eintraege(id,${ENTRY_FIELDS.join(",")},erstellt,geaendert,geaendert_von) VALUES(?,${ENTRY_FIELDS.map(() => "?").join(",")},?,?,?)`)
     .bind(id, ...ENTRY_FIELDS.map(k => v[k]), t, t, u.anzeigename).run();
   await log(env, u, "Angelegt", v.titel, `${v.bereich} · ${v.status}${v.datum ? " · " + v.datum : ""}`);
@@ -267,12 +301,14 @@ async function updateEntry(req, env, u, id) {
   if (!old || !canSeeGroup(u, old.bereich)) fail(404, "Eintrag nicht gefunden.");
   if (b.geaendert && b.geaendert !== old.geaendert) fail(409, "Jemand anderes hat diesen Eintrag inzwischen geändert. Bitte neu laden.");
   const v = readEntry(b, u);
+  await checkTeam(env, v.mannschaft_id);
   const changed = ENTRY_FIELDS.filter(k => String(old[k] ?? "") !== String(v[k]));
   if (!changed.length) return { eintrag: old };
   const t = nowIso();
   await env.DB.prepare(`UPDATE eintraege SET ${ENTRY_FIELDS.map(k => k + "=?").join(",")}, geaendert=?, geaendert_von=? WHERE id=?`)
     .bind(...ENTRY_FIELDS.map(k => v[k]), t, u.anzeigename, id).run();
-  await log(env, u, "Geändert", v.titel, changed.map(k => k === "inhalt" ? "Inhalt bearbeitet" : k === "rueckmeldung" ? `Rückmeldung erwünscht: ${v[k] ? "ja" : "nein"}` : `${k}: „${old[k] || "–"}“ → „${v[k] || "–"}“`).join("\n"));
+  const label = { rueckmeldung: x => `Rückmeldung erwünscht: ${x ? "ja" : "nein"}`, fuer_trainer: x => `Für Trainer sichtbar: ${x ? "ja" : "nein"}`, mannschaft_id: x => `Mannschaft: ${x || "alle"}` };
+  await log(env, u, "Geändert", v.titel, changed.map(k => k === "inhalt" ? "Inhalt bearbeitet" : label[k] ? label[k](v[k]) : `${k}: „${old[k] || "–"}“ → „${v[k] || "–"}“`).join("\n"));
   return { eintrag: await env.DB.prepare("SELECT * FROM eintraege WHERE id=?").bind(id).first() };
 }
 async function deleteEntry(env, u, id) {
@@ -293,6 +329,8 @@ async function importEntries(req, env, u) {
   if (!Array.isArray(b.eintraege) || !b.eintraege.length) fail(400, "Keine Zeilen zum Importieren.");
   if (b.eintraege.length > MAX_IMPORT) fail(400, `Höchstens ${MAX_IMPORT} Zeilen auf einmal.`);
   const rows = b.eintraege.map(r => readEntry(r, u)), t = nowIso();
+  const known = new Set((await teamList(env)).map(x => x.id));
+  for (const r of rows) if (r.mannschaft_id && !known.has(r.mannschaft_id)) r.mannschaft_id = "";
   await bulkInsert(env, "eintraege", ENTRY_FIELDS, rows.map(v => ({ ...v, id: uid(), erstellt: t, geaendert: t, geaendert_von: u.anzeigename })));
   const bereiche = [...new Set(rows.map(r => r.bereich))].join(", ");
   await log(env, u, "Importiert", `${rows.length} Einträge`, `${bereiche}${b.datei ? " · aus " + clean(b.datei, 200) : ""}`);
@@ -316,13 +354,13 @@ async function bulkInsert(env, table, fields, rows) {
 
 /* ---- Anhänge an Einträgen (gleiche Rechte wie der Eintrag; löschen nur Vorstand) ---- */
 async function visibleEntry(env, u, id) {
-  const e = await env.DB.prepare("SELECT id, titel, bereich FROM eintraege WHERE id=?").bind(id).first();
-  if (!e || !canSeeGroup(u, e.bereich)) fail(404, "Eintrag nicht gefunden.");
+  const e = await env.DB.prepare("SELECT id, titel, bereich, rueckmeldung, fuer_trainer, mannschaft_id FROM eintraege WHERE id=?").bind(id).first();
+  if (!e || !canSeeEntry(u, e)) fail(404, "Eintrag nicht gefunden.");
   return e;
 }
 async function visibleAttachment(env, u, id) {
-  const a = await env.DB.prepare("SELECT a.*, e.bereich, e.titel FROM anhaenge a JOIN eintraege e ON e.id=a.eintrag_id WHERE a.id=?").bind(id).first();
-  if (!a || !canSeeGroup(u, a.bereich)) fail(404, "Anhang nicht gefunden.");
+  const a = await env.DB.prepare("SELECT a.*, e.bereich, e.titel, e.fuer_trainer, e.mannschaft_id FROM anhaenge a JOIN eintraege e ON e.id=a.eintrag_id WHERE a.id=?").bind(id).first();
+  if (!a || !canSeeEntry(u, a)) fail(404, "Anhang nicht gefunden.");
   return a;
 }
 async function readUpload(req) {
@@ -338,6 +376,7 @@ async function readUpload(req) {
   return { buf, name, mime };
 }
 async function addAttachment(req, env, u, entryId) {
+  needNotTrainer(u);
   const e = await visibleEntry(env, u, entryId);
   const { buf, name, mime } = await readUpload(req);
   const id = uid(), t = nowIso();
@@ -385,15 +424,36 @@ function readParent(b) {
 const PEOPLE = {
   mitglieder: { table: "mitglieder", fields: MEMBER_FIELDS, read: readMember, order: "nachname, vorname", label: "Mitglied",
     name: v => `${v.vorname} ${v.nachname}`.trim(), key: v => `${v.vorname}|${v.nachname}|${v.geburtsdatum}`.toLowerCase() },
-  eltern: { table: "eltern", fields: PARENT_FIELDS, read: readParent, order: "mannschaft, name, email", label: "Eltern",
+  eltern: { table: "eltern", fields: PARENT_FIELDS, read: readParent, order: "mannschaft, name, email", label: "Eltern-Adresse",
     name: v => v.name || v.email, key: v => v.email.toLowerCase() },
 };
-async function listPeople(env, P) {
+function ageOf(d) {
+  if (!d) return null;
+  const [y, m, dd] = d.split("-").map(Number), [ty, tm, td] = nowIso().slice(0, 10).split("-").map(Number);
+  return ty - y - (tm < m || (tm === m && td < dd) ? 1 : 0);
+}
+async function listPeople(env, P, u) {
+  if (u && isTrainer(u)) {
+    // Trainer: nur eigene Mannschaft(en), nur die nötigen Felder – kein Geburtsdatum, keine Notiz, kein Telefon
+    const teams = u.teams || [];
+    if (!teams.length) return { liste: [] };
+    const { results } = await env.DB.prepare(`SELECT * FROM ${P.table} WHERE mannschaft_id IN (${teams.map(() => "?").join(",")}) ORDER BY ${P.order}`).bind(...teams).all();
+    return { liste: results.map(P.table === "mitglieder"
+      ? r => ({ id: r.id, vorname: r.vorname, nachname: r.nachname, alter: ageOf(r.geburtsdatum), status: r.status, mannschaft: r.mannschaft, mannschaft_id: r.mannschaft_id })
+      : r => ({ id: r.id, name: r.name, email: r.email, kind: r.kind, mannschaft: r.mannschaft, mannschaft_id: r.mannschaft_id })) };
+  }
   const { results } = await env.DB.prepare(`SELECT * FROM ${P.table} ORDER BY ${P.order}`).all();
   return { liste: results };
 }
+// Mannschaft zuordnen: gültige ID → Name übernehmen; sonst über den Namen (ohne Groß/klein, Leerzeichen, Bindestriche)
+function resolveTeam(v, teams) {
+  const byId = teams.find(x => x.id === v.mannschaft_id);
+  const t = byId || (v.mannschaft ? teams.find(x => normTeam(x.name) === normTeam(v.mannschaft)) : null);
+  if (t) { v.mannschaft_id = t.id; v.mannschaft = t.name; } else v.mannschaft_id = "";
+  return v;
+}
 async function savePerson(req, env, u, P, id) {
-  const b = await body(req), v = P.read(b), t = nowIso(), isNew = !id;
+  const b = await body(req), v = resolveTeam(P.read(b), await teamList(env)), t = nowIso(), isNew = !id;
   if (id) {
     const old = await env.DB.prepare(`SELECT geaendert FROM ${P.table} WHERE id=?`).bind(id).first();
     if (!old) fail(404, "Nicht gefunden.");
@@ -412,7 +472,8 @@ async function importPeople(req, env, u, P) {
   const b = await body(req);
   if (!Array.isArray(b.liste) || !b.liste.length) fail(400, "Keine Zeilen zum Importieren.");
   if (b.liste.length > MAX_IMPORT) fail(400, `Höchstens ${MAX_IMPORT} Zeilen auf einmal.`);
-  const rows = b.liste.map(P.read), t = nowIso();
+  const teams = await teamList(env);
+  const rows = b.liste.map(x => resolveTeam(P.read(x), teams)), t = nowIso();
   const { results } = await env.DB.prepare(`SELECT ${P.fields.join(",")} FROM ${P.table}`).all();
   const seen = new Set(results.map(P.key)), neu = [];
   for (const v of rows) { const k = P.key(v); if (!seen.has(k)) { seen.add(k); neu.push(v); } }
@@ -631,39 +692,258 @@ async function setInvoiceStatus(req, env, u, id) {
   return { rechnung: await env.DB.prepare("SELECT * FROM rechnungen WHERE id=?").bind(id).first() };
 }
 
+/* ---- Mannschaftsliste (alle lesen – Trainer nur seine; pflegen nur Vorstand) ---- */
+async function listTeams(env, u) {
+  const all = await teamList(env);
+  if (isTrainer(u)) return { mannschaften: all.filter(t => (u.teams || []).includes(t.id)) };
+  const out = { mannschaften: all };
+  if (isVorstand(u)) {
+    // Freitext-Werte ohne Zuordnung (aus alter Zeit oder Import)
+    const { results } = await env.DB.prepare(`SELECT name, SUM(m) mitglieder, SUM(e) eltern FROM (
+        SELECT trim(mannschaft) name, 1 m, 0 e FROM mitglieder WHERE mannschaft_id='' AND trim(mannschaft)<>''
+        UNION ALL SELECT trim(mannschaft), 0, 1 FROM eltern WHERE mannschaft_id='' AND trim(mannschaft)<>'') GROUP BY name ORDER BY name`).all();
+    out.nicht_zugeordnet = results;
+  }
+  return out;
+}
+function readTeam(b) {
+  const v = { name: clean(b.name, 60), sortierung: Math.round(Number(b.sortierung) || 0), aktiv: b.aktiv === false || b.aktiv === 0 ? 0 : 1 };
+  if (!v.name) fail(400, "Bitte einen Namen für die Mannschaft eingeben.");
+  return v;
+}
+async function saveTeam(req, env, u, id) {
+  needVorstand(u);
+  const v = readTeam(await body(req)), t = nowIso();
+  const clash = (await teamList(env)).find(x => x.id !== id && normTeam(x.name) === normTeam(v.name));
+  if (clash) fail(409, `Die Mannschaft „${clash.name}“ gibt es schon.`);
+  if (id) {
+    const old = await env.DB.prepare("SELECT * FROM mannschaften WHERE id=?").bind(id).first();
+    if (!old) fail(404, "Mannschaft nicht gefunden.");
+    await env.DB.batch([
+      env.DB.prepare("UPDATE mannschaften SET name=?, sortierung=?, aktiv=?, geaendert=? WHERE id=?").bind(v.name, v.sortierung, v.aktiv, t, id),
+      env.DB.prepare("UPDATE mitglieder SET mannschaft=? WHERE mannschaft_id=?").bind(v.name, id),
+      env.DB.prepare("UPDATE eltern SET mannschaft=? WHERE mannschaft_id=?").bind(v.name, id),
+    ]);
+    await log(env, u, "Mannschaft geändert", v.name, [old.name !== v.name && `Name: „${old.name}“ → „${v.name}“`, old.aktiv !== v.aktiv && (v.aktiv ? "wieder aktiv" : "deaktiviert"), old.sortierung !== v.sortierung && `Sortierung: ${v.sortierung}`].filter(Boolean).join("\n"));
+  } else {
+    id = uid();
+    await env.DB.prepare("INSERT INTO mannschaften(id,name,sortierung,aktiv,erstellt,geaendert) VALUES(?,?,?,?,?,?)").bind(id, v.name, v.sortierung, v.aktiv, t, t).run();
+    await log(env, u, "Mannschaft angelegt", v.name);
+  }
+  return listTeams(env, u);
+}
+// Freitext-Wert („nicht zugeordnet“) einer Mannschaft der Liste zuordnen
+async function assignTeam(req, env, u) {
+  needVorstand(u);
+  const b = await body(req), text = clean(b.text, 80);
+  const team = await env.DB.prepare("SELECT * FROM mannschaften WHERE id=?").bind(clean(b.mannschaft_id, 60)).first();
+  if (!text || !team) fail(400, "Bitte Wert und Mannschaft angeben.");
+  const r = await env.DB.batch([
+    env.DB.prepare("UPDATE mitglieder SET mannschaft_id=?, mannschaft=? WHERE mannschaft_id='' AND trim(mannschaft)=?").bind(team.id, team.name, text),
+    env.DB.prepare("UPDATE eltern SET mannschaft_id=?, mannschaft=? WHERE mannschaft_id='' AND trim(mannschaft)=?").bind(team.id, team.name, text),
+  ]);
+  await log(env, u, "Mannschaft zugeordnet", team.name, `„${text}“ → ${team.name} (${r[0].meta.changes} Mitglieder, ${r[1].meta.changes} Eltern)`);
+  return listTeams(env, u);
+}
+// Aus der JSON-Sicherung: fehlende Mannschaften anlegen (über den Namen)
+async function importTeams(req, env, u) {
+  needVorstand(u);
+  const b = await body(req);
+  if (!Array.isArray(b.liste)) fail(400, "Keine Mannschaften.");
+  const have = await teamList(env), t = nowIso(), stmts = [], neu = [];
+  for (const x of b.liste.slice(0, 200)) {
+    const v = readTeam(x);
+    if (have.some(h => normTeam(h.name) === normTeam(v.name)) || neu.some(n => normTeam(n) === normTeam(v.name))) continue;
+    neu.push(v.name);
+    stmts.push(env.DB.prepare("INSERT INTO mannschaften(id,name,sortierung,aktiv,erstellt,geaendert) VALUES(?,?,?,?,?,?)").bind(uid(), v.name, v.sortierung, v.aktiv, t, t));
+  }
+  if (stmts.length) { await env.DB.batch(stmts); await log(env, u, "Importiert", `${neu.length} Mannschaften`, neu.join(", ")); }
+  return { ...(await listTeams(env, u)), neu: neu.length };
+}
+
+/* ---- Kasse (Vorstand liest, nur Schatzmeister schreibt; nie löschen, nur stornieren) ---- */
+async function getKasseSettings(env) {
+  const row = await env.DB.prepare("SELECT wert, geaendert, geaendert_von FROM einstellungen WHERE schluessel='kasse'").first();
+  let v = {}; try { v = row ? JSON.parse(row.wert) : {}; } catch {}
+  return { ...KASSE_DEFAULTS, ...v, geaendert: row?.geaendert || "", geaendert_von: row?.geaendert_von || "" };
+}
+async function listKasse(env) {
+  const [b, d] = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM kassenbuchungen ORDER BY datum DESC, jahr DESC, lfd DESC"),
+    env.DB.prepare("SELECT id, buchung_id, dateiname, mime, groesse, erstellt, erstellt_von FROM kassen_belege ORDER BY erstellt"),
+  ]);
+  const belege = {};
+  for (const x of d.results) (belege[x.buchung_id] ||= []).push(x);
+  return { buchungen: b.results.map(x => ({ ...x, belege: belege[x.id] || [] })), einstellungen: await getKasseSettings(env) };
+}
+async function saveKasseSettings(req, env, u) {
+  needSchatzmeister(u);
+  const b = await body(req);
+  const cents = x => { const n = Math.round(Number(x)); if (!Number.isFinite(n) || Math.abs(n) > 1e11) fail(400, "Anfangsbestand ungültig."); return n; };
+  const kat = [...new Set((Array.isArray(b.kategorien) ? b.kategorien : []).map(k => clean(k, 60)).filter(Boolean))].slice(0, 50);
+  if (!kat.length) fail(400, "Bitte mindestens eine Kategorie angeben.");
+  const v = { kategorien: kat, anfang_bar: cents(b.anfang_bar), anfang_bank: cents(b.anfang_bank), stichtag: clean(b.stichtag, 10) };
+  if (!validDate(v.stichtag)) fail(400, "Stichtag ungültig.");
+  await env.DB.prepare(`INSERT INTO einstellungen(schluessel,wert,geaendert,geaendert_von) VALUES('kasse',?,?,?)
+    ON CONFLICT(schluessel) DO UPDATE SET wert=excluded.wert, geaendert=excluded.geaendert, geaendert_von=excluded.geaendert_von`).bind(JSON.stringify(v), nowIso(), u.anzeigename).run();
+  await log(env, u, "Kasse: Einstellungen geändert", "Kasse", `Anfang Bar ${(v.anfang_bar / 100).toFixed(2)} € · Bank ${(v.anfang_bank / 100).toFixed(2)} €${v.stichtag ? " · Stichtag " + v.stichtag : ""}\nKategorien: ${kat.join(", ")}`);
+  return listKasse(env);
+}
+async function createBooking(req, env, u) {
+  needSchatzmeister(u);
+  const b = await body(req), s = await getKasseSettings(env);
+  const v = { datum: clean(b.datum, 10), art: clean(b.art, 10), betrag: Math.round(Number(b.betrag)), kategorie: clean(b.kategorie, 60),
+    beschreibung: clean(b.beschreibung, 1000), zahlungsweg: clean(b.zahlungsweg, 10), rechnung_id: clean(b.rechnung_id, 60), rechnung_nr: "" };
+  if (!v.datum || !validDate(v.datum)) fail(400, "Bitte ein gültiges Datum angeben.");
+  if (!["einnahme","ausgabe"].includes(v.art)) fail(400, "Bitte Einnahme oder Ausgabe wählen.");
+  if (!Number.isFinite(v.betrag) || v.betrag <= 0 || v.betrag > 1e11) fail(400, "Bitte einen Betrag größer als 0 eingeben.");
+  if (!s.kategorien.includes(v.kategorie)) fail(400, "Unbekannte Kategorie.");
+  if (!["bar","bank"].includes(v.zahlungsweg)) fail(400, "Bitte Bar oder Bank wählen.");
+  if (!v.beschreibung) fail(400, "Bitte eine Beschreibung eingeben.");
+  if (v.rechnung_id) {
+    const r = await env.DB.prepare("SELECT nummer FROM rechnungen WHERE id=?").bind(v.rechnung_id).first();
+    if (!r) fail(400, "Rechnung nicht gefunden.");
+    v.rechnung_nr = r.nummer;
+    const dup = await env.DB.prepare("SELECT belegnr FROM kassenbuchungen WHERE rechnung_id=? AND storniert=0").bind(v.rechnung_id).first();
+    if (dup && !b.trotzdem) fail(409, `Für Rechnung ${r.nummer} gibt es schon die Buchung ${dup.belegnr}.`);
+  }
+  const id = uid(), t = nowIso(), jahr = v.datum.slice(0, 4);   // Jahr als Text (sonst „2026.0“)
+  const cols = ["datum","art","betrag","kategorie","beschreibung","zahlungsweg","rechnung_id","rechnung_nr"];
+  await env.DB.prepare(`INSERT INTO kassenbuchungen(id,jahr,lfd,belegnr,${cols.join(",")},erstellt,erstellt_von)
+    SELECT ?1, ?2, n, 'K-' || ?2 || '-' || printf('%04d', n), ${cols.map((_, i) => "?" + (i + 3)).join(",")}, ?${cols.length + 3}, ?${cols.length + 4}
+    FROM (SELECT COALESCE(MAX(lfd), 0) + 1 AS n FROM kassenbuchungen WHERE jahr = ?2)`).bind(id, jahr, ...cols.map(k => v[k]), t, u.anzeigename).run();
+  const row = await env.DB.prepare("SELECT * FROM kassenbuchungen WHERE id=?").bind(id).first();
+  await log(env, u, "Kasse: gebucht", row.belegnr, `${v.art === "einnahme" ? "Einnahme" : "Ausgabe"} ${(v.betrag / 100).toFixed(2).replace(".", ",")} € · ${v.kategorie} · ${v.zahlungsweg === "bar" ? "Bar" : "Bank"}${v.rechnung_nr ? " · " + v.rechnung_nr : ""}\n${v.beschreibung}`);
+  return { buchung: row };
+}
+async function stornoBooking(req, env, u, id) {
+  needSchatzmeister(u);
+  const b = await body(req), grund = clean(b.grund, 500);
+  if (!grund) fail(400, "Bitte einen Grund für das Storno angeben.");
+  const old = await env.DB.prepare("SELECT * FROM kassenbuchungen WHERE id=?").bind(id).first();
+  if (!old) fail(404, "Buchung nicht gefunden.");
+  if (old.storniert) fail(409, "Die Buchung ist bereits storniert.");
+  await env.DB.prepare("UPDATE kassenbuchungen SET storniert=1, storno_grund=?, storno_am=?, storno_von=? WHERE id=?").bind(grund, nowIso(), u.anzeigename, id).run();
+  await log(env, u, "Kasse: storniert", old.belegnr, grund);
+  return listKasse(env);
+}
+async function addReceipt(req, env, u, id) {
+  needSchatzmeister(u);
+  const k = await env.DB.prepare("SELECT belegnr FROM kassenbuchungen WHERE id=?").bind(id).first();
+  if (!k) fail(404, "Buchung nicht gefunden.");
+  const { buf, name, mime } = await readUpload(req);
+  const bid = uid(), stmts = [env.DB.prepare("INSERT INTO kassen_belege(id,buchung_id,dateiname,mime,groesse,erstellt,erstellt_von) VALUES(?,?,?,?,?,?,?)").bind(bid, id, name, mime, buf.length, nowIso(), u.anzeigename)];
+  for (let i = 0, nr = 0; i < buf.length; i += CHUNK, nr++)
+    stmts.push(env.DB.prepare("INSERT INTO kassen_beleg_teile(beleg_id,nr,daten) VALUES(?,?,?)").bind(bid, nr, buf.slice(i, i + CHUNK)));
+  await env.DB.batch(stmts);
+  await log(env, u, "Kasse: Beleg angehängt", k.belegnr, name);
+  return { ok: true, id: bid };
+}
+async function getReceipt(env, id, cors) {
+  const d = await env.DB.prepare("SELECT dateiname, mime, groesse FROM kassen_belege WHERE id=?").bind(id).first();
+  if (!d) fail(404, "Beleg nicht gefunden.");
+  const { results } = await env.DB.prepare("SELECT daten FROM kassen_beleg_teile WHERE beleg_id=? ORDER BY nr").bind(id).all();
+  const out = new Uint8Array(d.groesse); let o = 0;
+  for (const r of results) { const part = new Uint8Array(r.daten); out.set(part, o); o += part.length; }
+  return new Response(out, { headers: { "Content-Type": d.mime || "application/octet-stream",
+    "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(d.dateiname)}`, ...SECURITY, ...cors } });
+}
+
+/* ---- Wiederherstellen aus der JSON-Sicherung (nur in leere Tabellen – feste Nummern dürfen nie doppelt sein) ---- */
+async function jsonInsert(env, table, cols, rows) {
+  const sql = `INSERT INTO ${table}(${cols.join(",")}) SELECT ${cols.map(c => `json_extract(value,'$.${c}')`).join(",")} FROM json_each(?)`;
+  const stmts = []; let chunk = [], size = 0;
+  for (const r of rows) {
+    const s = JSON.stringify(r).length;
+    if (chunk.length && size + s > 800000) { stmts.push(env.DB.prepare(sql).bind(JSON.stringify(chunk))); chunk = []; size = 0; }
+    chunk.push(r); size += s;
+  }
+  if (chunk.length) stmts.push(env.DB.prepare(sql).bind(JSON.stringify(chunk)));
+  if (stmts.length) await env.DB.batch(stmts);
+}
+const RESTORE = {
+  rechnungen: { need: needVorstand, label: "Rechnungen", nr: "nummer", prefix: "SKU",
+    cols: ["id","jahr","lfd","nummer","datum","leistungsdatum","faellig","empfaenger","betreff","einleitung","positionen","schlusstext","absender","netto","steuer","brutto","status","bezahlt_am","erstellt","erstellt_von","geaendert","geaendert_von"],
+    check: r => INVOICE_STATUSES.includes(r.status) && validDate(r.datum) },
+  kassenbuchungen: { need: needSchatzmeister, label: "Kassenbuchungen", nr: "belegnr", prefix: "K",
+    cols: ["id","jahr","lfd","belegnr","datum","art","betrag","kategorie","beschreibung","zahlungsweg","rechnung_id","rechnung_nr","storniert","storno_grund","storno_am","storno_von","erstellt","erstellt_von"],
+    check: r => ["einnahme","ausgabe"].includes(r.art) && ["bar","bank"].includes(r.zahlungsweg) && Number(r.betrag) > 0 && validDate(r.datum) },
+};
+async function restoreTable(req, env, u, name) {
+  const R = RESTORE[name]; R.need(u);
+  const b = await body(req);
+  if (!Array.isArray(b.liste) || !b.liste.length) fail(400, "Nichts zum Wiederherstellen.");
+  const n = (await env.DB.prepare(`SELECT COUNT(*) n FROM ${name}`).first()).n;
+  if (n > 0) fail(409, `${R.label} werden nur in eine leere Liste zurückgespielt (es gibt schon ${n}). Feste Nummern dürfen nie doppelt vorkommen.`);
+  const rows = b.liste.slice(0, 20000).map(r => {
+    const x = {}; for (const c of R.cols) x[c] = r[c] ?? (["jahr","lfd","netto","steuer","brutto","betrag","storniert"].includes(c) ? 0 : "");
+    x.jahr = String(x.jahr); x.lfd = Number(x.lfd);
+    if (!x.id || !R.check(x) || !new RegExp(`^${R.prefix}-\\d{4}-\\d{4,}$`).test(x[R.nr])) fail(400, `Ungültiger Datensatz: ${x[R.nr] || "ohne Nummer"}`);
+    return x;
+  });
+  await jsonInsert(env, name, R.cols, rows);
+  await log(env, u, "Wiederhergestellt", `${rows.length} ${R.label}`, b.datei ? "aus " + clean(b.datei, 200) : "");
+  return { ok: true, anzahl: rows.length };
+}
+
 /* ---- Benutzer (nur Admins) ---- */
 async function listUsers(env) {
-  const { results } = await env.DB.prepare("SELECT * FROM benutzer ORDER BY rolle DESC, anzeigename").all();
-  return { benutzer: results.map(publicUser) };
+  const [b, tm] = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM benutzer ORDER BY rolle DESC, anzeigename"),
+    env.DB.prepare("SELECT benutzer_id, mannschaft_id FROM trainer_mannschaften"),
+  ]);
+  const teams = {};
+  for (const x of tm.results) (teams[x.benutzer_id] ||= []).push(x.mannschaft_id);
+  return { benutzer: b.results.map(x => publicUser({ ...x, teams: x.rolle === "trainer" ? teams[x.id] || [] : undefined })) };
 }
 async function adminCount(env) { return (await env.DB.prepare("SELECT COUNT(*) n FROM benutzer WHERE ist_admin=1 AND aktiv=1").first()).n; }
+// Mannschaften eines Trainers prüfen (nur gültige IDs)
+async function readTrainerTeams(env, list) {
+  if (!Array.isArray(list)) return null;
+  const known = new Set((await teamList(env)).map(x => x.id));
+  const ids = [...new Set(list.map(x => String(x)))];
+  if (ids.some(x => !known.has(x))) fail(400, "Unbekannte Mannschaft.");
+  return ids;
+}
+const rightsText = (rolle, admin, schatz, teams, all) => `Rolle: ${rolle}${admin ? " + Admin" : ""}${schatz ? " + Schatzmeister" : ""}${rolle === "trainer" ? " · Mannschaften: " + (teams.map(id => all.find(x => x.id === id)?.name || id).join(", ") || "keine") : ""}`;
 async function createUser(req, env, u) {
   const b = await body(req);
   const name = cleanUsername(b.benutzername);
-  if (!["vorstand","ausschuss"].includes(b.rolle)) fail(400, "Rolle muss Vorstand oder Ausschuss sein.");
+  if (!ROLES.includes(b.rolle)) fail(400, "Rolle muss Vorstand, Ausschuss oder Trainer sein.");
   const admin = b.rolle === "vorstand" && b.ist_admin ? 1 : 0;
+  const schatz = b.rolle === "vorstand" && b.ist_schatzmeister ? 1 : 0;   // Trainer/Ausschuss nie Admin oder Schatzmeister
+  const teams = b.rolle === "trainer" ? (await readTrainerTeams(env, b.mannschaften)) || [] : [];
   const pw = await makePassword(checkClientHash(b.passwort), env.PEPPER);
+  const id = uid();
   try {
-    await env.DB.prepare(`INSERT INTO benutzer(id,benutzername,anzeigename,rolle,ist_admin,pw_hash,pw_salt,pw_iter,pw_aendern,erstellt) VALUES(?,?,?,?,?,?,?,?,1,?)`)
-      .bind(uid(), name, clean(b.anzeigename, 80) || name, b.rolle, admin, pw.pw_hash, pw.pw_salt, pw.pw_iter, nowIso()).run();
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO benutzer(id,benutzername,anzeigename,rolle,ist_admin,ist_schatzmeister,pw_hash,pw_salt,pw_iter,pw_aendern,erstellt) VALUES(?,?,?,?,?,?,?,?,?,1,?)`)
+        .bind(id, name, clean(b.anzeigename, 80) || name, b.rolle, admin, schatz, pw.pw_hash, pw.pw_salt, pw.pw_iter, nowIso()),
+      ...teams.map(m => env.DB.prepare("INSERT INTO trainer_mannschaften(benutzer_id,mannschaft_id) VALUES(?,?)").bind(id, m)),
+    ]);
   } catch { fail(409, "Diesen Benutzernamen gibt es schon."); }
-  await log(env, u, "Benutzer angelegt", clean(b.anzeigename, 80) || name, `Rolle: ${b.rolle}${admin ? " + Admin" : ""}`);
+  await log(env, u, "Benutzer angelegt", clean(b.anzeigename, 80) || name, rightsText(b.rolle, admin, schatz, teams, await teamList(env)));
   return listUsers(env);
 }
 async function updateUser(req, env, u, id) {
   const b = await body(req);
   const t = await env.DB.prepare("SELECT * FROM benutzer WHERE id=?").bind(id).first();
   if (!t) fail(404, "Benutzer nicht gefunden.");
-  const rolle = ["vorstand","ausschuss"].includes(b.rolle) ? b.rolle : t.rolle;
+  const rolle = ROLES.includes(b.rolle) ? b.rolle : t.rolle;
   const ist_admin = rolle === "vorstand" && (b.ist_admin ?? !!t.ist_admin) ? 1 : 0;
+  const ist_schatzmeister = rolle === "vorstand" && (b.ist_schatzmeister ?? !!t.ist_schatzmeister) ? 1 : 0;
   const aktiv = (b.aktiv ?? !!t.aktiv) ? 1 : 0;
   const anzeigename = clean(b.anzeigename ?? t.anzeigename, 80) || t.benutzername;
   if (t.ist_admin && t.aktiv && (!ist_admin || !aktiv) && (await adminCount(env)) <= 1) fail(400, "Mindestens ein aktiver Admin muss bleiben.");
   if (id === u.id && (!aktiv || !ist_admin)) fail(400, "Du kannst dir nicht selbst die Admin-Rechte nehmen oder dich deaktivieren.");
-  const stmts = [env.DB.prepare("UPDATE benutzer SET anzeigename=?, rolle=?, ist_admin=?, aktiv=? WHERE id=?").bind(anzeigename, rolle, ist_admin, aktiv, id)];
+  const oldTeams = await trainerTeams(env, id);
+  const teams = rolle !== "trainer" ? [] : (await readTrainerTeams(env, b.mannschaften)) ?? oldTeams;
+  const stmts = [env.DB.prepare("UPDATE benutzer SET anzeigename=?, rolle=?, ist_admin=?, ist_schatzmeister=?, aktiv=? WHERE id=?").bind(anzeigename, rolle, ist_admin, ist_schatzmeister, aktiv, id),
+    env.DB.prepare("DELETE FROM trainer_mannschaften WHERE benutzer_id=?").bind(id),
+    ...teams.map(m => env.DB.prepare("INSERT INTO trainer_mannschaften(benutzer_id,mannschaft_id) VALUES(?,?)").bind(id, m))];
   if (!aktiv || rolle !== t.rolle) stmts.push(env.DB.prepare("DELETE FROM sitzungen WHERE benutzer_id=?").bind(id));
   await env.DB.batch(stmts);
-  await log(env, u, "Benutzer geändert", anzeigename, `Rolle: ${rolle}${ist_admin ? " + Admin" : ""}${aktiv ? "" : " · deaktiviert"}`);
+  await log(env, u, "Benutzer geändert", anzeigename, rightsText(rolle, ist_admin, ist_schatzmeister, teams, await teamList(env)) + (aktiv ? "" : " · deaktiviert"));
   return listUsers(env);
 }
 async function resetPassword(req, env, u, id) {
@@ -683,7 +963,8 @@ async function deleteUser(env, u, id) {
   const t = await env.DB.prepare("SELECT * FROM benutzer WHERE id=?").bind(id).first();
   if (!t) fail(404, "Benutzer nicht gefunden.");
   if (t.ist_admin && t.aktiv && (await adminCount(env)) <= 1) fail(400, "Mindestens ein aktiver Admin muss bleiben.");
-  await env.DB.batch([env.DB.prepare("DELETE FROM sitzungen WHERE benutzer_id=?").bind(id), env.DB.prepare("DELETE FROM zusagen WHERE benutzer_id=?").bind(id), env.DB.prepare("DELETE FROM benutzer WHERE id=?").bind(id)]);
+  await env.DB.batch([env.DB.prepare("DELETE FROM sitzungen WHERE benutzer_id=?").bind(id), env.DB.prepare("DELETE FROM zusagen WHERE benutzer_id=?").bind(id),
+    env.DB.prepare("DELETE FROM trainer_mannschaften WHERE benutzer_id=?").bind(id), env.DB.prepare("DELETE FROM benutzer WHERE id=?").bind(id)]);
   await log(env, u, "Benutzer gelöscht", t.anzeigename);
   return listUsers(env);
 }
@@ -703,9 +984,17 @@ async function exportAll(env) {
   const zs = await env.DB.prepare("SELECT z.eintrag_id, b.anzeigename, z.antwort, z.geaendert FROM zusagen z JOIN benutzer b ON b.id=z.benutzer_id").all();
   const re = await env.DB.prepare("SELECT * FROM rechnungen ORDER BY jahr, lfd").all();
   const dl = await env.DB.prepare("SELECT * FROM downloads").all();
-  return { format: "sku-vereinszentrale", exportiert: nowIso(), eintraege: e.results, dokumente: d.results, protokoll: p.results,
+  const ms = await env.DB.prepare("SELECT * FROM mannschaften ORDER BY sortierung, name").all();
+  const tm = await env.DB.prepare("SELECT b.benutzername, b.anzeigename, t.mannschaft_id, m.name mannschaft FROM trainer_mannschaften t JOIN benutzer b ON b.id=t.benutzer_id JOIN mannschaften m ON m.id=t.mannschaft_id").all();
+  const bn = await env.DB.prepare("SELECT benutzername, anzeigename, rolle, ist_admin, ist_schatzmeister, aktiv, letzter_login, erstellt FROM benutzer ORDER BY anzeigename").all();
+  const kb = await env.DB.prepare("SELECT * FROM kassenbuchungen ORDER BY jahr, lfd").all();
+  const kl = await env.DB.prepare("SELECT id, buchung_id, dateiname, mime, groesse, erstellt, erstellt_von FROM kassen_belege").all();
+  const ks = await getKasseSettings(env);
+  return { format: "sku-vereinszentrale", version: 5, exportiert: nowIso(), eintraege: e.results, dokumente: d.results, protokoll: p.results,
     mitglieder: mg.results, eltern: el.results, anhaenge: an.results, zusagen: zs.results, rechnungen: re.results, downloads: dl.results,
-    einstellungen: (await getSettings(env)).verein };
+    einstellungen: (await getSettings(env)).verein, mannschaften: ms.results, trainer_mannschaften: tm.results, benutzer: bn.results,
+    kassenbuchungen: kb.results, kassen_belege: kl.results,
+    kasse_einstellungen: { kategorien: ks.kategorien, anfang_bar: ks.anfang_bar, anfang_bank: ks.anfang_bank, stichtag: ks.stichtag } };
 }
 
 /* ---------------- Router ---------------- */
@@ -721,6 +1010,7 @@ async function route(req, env, cors) {
   if (p === "/api/login" && M === "POST") return json(await login(req, env), 200, cors);
 
   const u = await authenticate(req, env);
+  if (isTrainer(u)) u.teams = await trainerTeams(env, u.id);
 
   if (p === "/api/logout" && M === "POST") { await env.DB.prepare("DELETE FROM sitzungen WHERE token_hash=?").bind(u.token_hash).run(); return json({ ok: true }, 200, cors); }
   if (p === "/api/ich" && M === "GET") return json({ benutzer: publicUser(u) }, 200, cors);
@@ -740,6 +1030,26 @@ async function route(req, env, cors) {
     if (M === "GET") return downloadAttachment(env, u, m[1], cors);
     if (M === "DELETE") return json(await deleteAttachment(env, u, m[1]), 200, cors);
   }
+  if (p === "/api/mannschaften" && M === "GET") return json(await listTeams(env, u), 200, cors);
+  if ((m = p.match(/^\/api\/(mitglieder|eltern)$/)) && M === "GET") return json(await listPeople(env, PEOPLE[m[1]], u), 200, cors);
+
+  // Ab hier: nichts mehr für Trainer
+  needNotTrainer(u);
+
+  if (p === "/api/mannschaften" && M === "POST") return json(await saveTeam(req, env, u, null), 200, cors);
+  if (p === "/api/mannschaften/zuordnen" && M === "POST") return json(await assignTeam(req, env, u), 200, cors);
+  if (p === "/api/mannschaften/import" && M === "POST") return json(await importTeams(req, env, u), 200, cors);
+  if ((m = p.match(/^\/api\/mannschaften\/([\w-]+)$/)) && M === "PUT") return json(await saveTeam(req, env, u, m[1]), 200, cors);
+
+  if (p.startsWith("/api/kasse")) needVorstand(u);
+  if (p === "/api/kasse" && M === "GET") return json(await listKasse(env), 200, cors);
+  if (p === "/api/kasse" && M === "POST") return json(await createBooking(req, env, u), 200, cors);
+  if (p === "/api/kasse/einstellungen" && M === "PUT") return json(await saveKasseSettings(req, env, u), 200, cors);
+  if (p === "/api/kasse/wiederherstellen" && M === "POST") return json(await restoreTable(req, env, u, "kassenbuchungen"), 200, cors);
+  if ((m = p.match(/^\/api\/kasse\/belege\/([\w-]+)$/)) && M === "GET") return getReceipt(env, m[1], cors);
+  if ((m = p.match(/^\/api\/kasse\/([\w-]+)\/storno$/)) && M === "POST") return json(await stornoBooking(req, env, u, m[1]), 200, cors);
+  if ((m = p.match(/^\/api\/kasse\/([\w-]+)\/belege$/)) && M === "POST") return json(await addReceipt(req, env, u, m[1]), 200, cors);
+  if (p === "/api/rechnungen/wiederherstellen" && M === "POST") return json(await restoreTable(req, env, u, "rechnungen"), 200, cors);
 
   if (p === "/api/downloads" && M === "GET") return json(await listDownloads(env), 200, cors);
   if (p === "/api/downloads" && M === "POST") return json(await saveDownload(req, env, u, null), 200, cors);
@@ -760,7 +1070,6 @@ async function route(req, env, cors) {
 
   if ((m = p.match(/^\/api\/(mitglieder|eltern)(?:\/([\w-]+))?$/))) {
     const P = PEOPLE[m[1]], id = m[2];
-    if (!id && M === "GET") return json(await listPeople(env, P), 200, cors);
     if (!id && M === "POST") return json(await savePerson(req, env, u, P, null), 200, cors);
     if (id === "import" && M === "POST") return json(await importPeople(req, env, u, P), 200, cors);
     if (id && id !== "import" && M === "PUT") return json(await savePerson(req, env, u, P, id), 200, cors);

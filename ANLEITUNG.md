@@ -11,16 +11,23 @@ Browser ──► GitHub Pages (docs/)          nur Oberfläche, keine Daten
 
 ## Rollen
 
-| | Vorstand | Ausschuss | Admin (zusätzlich) |
+| | Vorstand | Ausschuss | Trainer |
 |---|---|---|---|
-| Satzung & Beschlüsse, Vorstand & Ausschuss, Gründungsplan, Offene Entscheidungen | lesen + bearbeiten | **unsichtbar** | – |
-| Beiträge & Ehrenamt, Mannschaften, Elternkommunikation, Sponsoren, Kalender | lesen + bearbeiten | lesen + bearbeiten | – |
-| Mitglieder, Eltern-Verteiler, Datei-Anhänge an Einträgen | lesen + bearbeiten | lesen + bearbeiten (in seinen Bereichen) | – |
-| Einträge löschen | ✓ | ✗ | – |
-| Dokumente, Änderungsprotokoll, JSON-Sicherung | ✓ | **unsichtbar** | – |
-| Benutzer anlegen, Rollen vergeben, Passwörter zurücksetzen, deaktivieren | – | – | ✓ |
+| Satzung & Beschlüsse, Vorstand & Ausschuss, Gründungsplan, Offene Entscheidungen | lesen + bearbeiten | **unsichtbar** | **unsichtbar** |
+| Beiträge & Ehrenamt, Mannschaften, Elternkommunikation, Sponsoren, Kalender | lesen + bearbeiten | lesen + bearbeiten | nur Einträge mit „🏃 Für Trainer sichtbar“ (ggf. nur seiner Mannschaft), nur lesen + zu-/absagen |
+| Mitglieder | lesen + bearbeiten | lesen + bearbeiten | nur seine Mannschaft(en): Vorname, Nachname, Alter, Status |
+| Eltern-Verteiler | lesen + bearbeiten | lesen + bearbeiten | nur seine Mannschaft(en), nur lesen, E-Mail an Eltern (BCC) |
+| Downloads, Rechnungen | ✓ | ✓ (Rechnung stornieren nur Vorstand) | **unsichtbar** |
+| Kasse | lesen (schreiben nur mit Schatzmeister-Recht) | **unsichtbar** | **unsichtbar** |
+| Einträge, Mitglieder, Downloads löschen | ✓ | ✗ | ✗ |
+| Dokumente, Änderungsprotokoll, JSON-Sicherung | ✓ | **unsichtbar** | **unsichtbar** |
 
-Admin ist nur zusammen mit der Rolle Vorstand möglich. Registrieren kann sich niemand selbst – nur Admins legen Konten an.
+**Zusatzrechte (nur für Vorstand, beliebig kombinierbar):**
+
+- **Admin:** Benutzer anlegen, Rollen vergeben, Passwörter zurücksetzen, deaktivieren.
+- **Schatzmeister:** in der Kasse buchen, stornieren, Belege anhängen, Kasse einstellen. In *Benutzer* mit einem Klick auf das Feld „Schatzmeister“ an- bzw. ausschalten.
+
+Ausschuss und Trainer können nie Admin oder Schatzmeister sein. Registrieren kann sich niemand selbst – nur Admins legen Konten an. Beim Trainer wählt der Admin die **Mannschaften** aus (ein Trainer kann mehrere haben).
 
 ---
 
@@ -93,6 +100,23 @@ Als Admin anmelden → **Benutzer** → **＋ Benutzer** → Rolle wählen. Die 
 
 - **Downloads** (Vorstand + Ausschuss, nur nach Login): Dateien in den Kategorien Formulare, Sponsoren, Logos & Werbematerial, Sonstiges hochladen. Löschen darf nur der Vorstand. Fertig eingebaut: **Mitgliedsantrag** (mit SEPA-Mandat, Einwilligungen; zum Drucken oder als PDF) und **Logo-Paket**. Hinweis: Das vorhandene Logo hat nur 400 × 400 Pixel. Für Druckereien eine Vektordatei (SVG/PDF/EPS) vom Designer besorgen und hochladen.
 - **Rechnungen / Rechnung erstellen** (Vorstand + Ausschuss): Die Rechnungsnummer **SKU-Jahr-laufende Nummer** (z. B. SKU-2026-0001) wird beim Erstellen automatisch und lückenlos vergeben und kann nicht geändert werden. Fest sind außerdem Vereinsname und Logo. Alles andere ist frei: Empfänger, Positionen, MwSt.-Satz je Position (auch 0 %), Zahlungsziel, Texte, Absender, Bank, Ersteller. Die Standardwerte stehen unter **Vereinsdaten & Vorlage**. Rechnungen werden nie gelöscht. Sie werden nur **storniert** (nur Vorstand), denn so verlangt es die Buchhaltung. *Drucken / als PDF speichern* erzeugt eine A4-Rechnung. Im Druckfenster „Als PDF speichern“ wählen.
+
+## Mannschaftsliste, Trainer, Kasse
+
+- **Mannschaftsliste** (Reiter *Mitglieder* → „Mannschaftsliste“, pflegt nur der Vorstand): Mannschaften anlegen, umbenennen, sortieren, deaktivieren. Bei Mitgliedern und Eltern wird die Mannschaft aus dieser Liste gewählt. Beim Excel/CSV-Import wird über den Namen zugeordnet (Groß-/Kleinschreibung, Leerzeichen und Bindestriche egal: „u 11“ = „U11“). Unbekannte Namen werden in der Vorschau mit ⚠ markiert und erscheinen danach unter **„Nicht zugeordnet“**. Dort kann man sie einer Mannschaft zuordnen oder als neue Mannschaft anlegen.
+- **Termine für Trainer:** Im Eintrag-Fenster gibt es **„🏃 Für Trainer sichtbar“** und darunter die Auswahl „Alle Trainer“ oder „Nur Trainer von …“. Das geht nur in Bereichen, die auch der Ausschuss sieht. Vorstands-Bereiche bleiben immer verborgen. Die Liste „noch offen“ bei Zu-/Absagen enthält nur Personen, die den Termin wirklich sehen.
+- **Kasse** (im Menü über *Rechnungen*): Kassenbuch mit Einnahmen und Ausgaben, Kategorie, Bar oder Bank, Beleg (PDF/Bild) und Bezug zu einer Rechnung. Die **Belegnummer K-Jahr-0001** wird automatisch und lückenlos vergeben. Buchungen werden **nie gelöscht oder geändert**, nur mit Grund storniert. Oben stehen Kassenstand Bar, Kontostand Bank sowie Einnahmen und Ausgaben des Jahres. Unter *Einstellungen* (nur Schatzmeister) stehen die Anfangsbestände mit Stichtag und die Kategorien. *CSV* exportiert die gefilterte Auswahl, z. B. ein ganzes Jahr für den Steuerberater. Wird eine Rechnung auf *Bezahlt* gesetzt, fragt die Seite den Schatzmeister, ob eine Einnahme gebucht werden soll.
+- **JSON-Sicherung:** Sie enthält jetzt auch Mannschaften, Trainer-Zuordnungen, Konten (ohne Passwörter), Kassenbuchungen und Kasse-Einstellungen. Beim Import werden Mannschaften über den Namen ergänzt. **Rechnungen und Kassenbuchungen** werden nur in eine **leere** Liste zurückgespielt, mit ihren festen Nummern (Kasse nur durch den Schatzmeister). Dateien (Anhänge, Downloads, Belege) und Konten sind nicht in der Sicherung.
+
+**Migration auf Version 5** (einmalig, im Ordner `worker`, Reihenfolge einhalten):
+
+```bash
+npm run db:backup                                              # Sicherung → backup.sql (nicht hochladen!)
+npx.cmd wrangler d1 migrations apply vereinszentrale --remote  # baut u. a. die Benutzertabelle neu auf
+npx.cmd wrangler deploy                                        # neuer Server
+```
+
+Danach die Seite (Ordner `docs/`) zu GitHub hochladen. Die Migration behält alle Konten, Anmeldungen und Zusagen und legt aus den vorhandenen Mannschafts-Namen die Mannschaftsliste an.
 
 **Datenschutz:** Mitglieder- und Elterndaten sind personenbezogen. Nur eintragen, was der Verein braucht. Ausgetretene Mitglieder auf Status *Ausgetreten* setzen oder löschen (lassen).
 

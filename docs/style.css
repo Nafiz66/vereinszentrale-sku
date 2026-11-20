@@ -252,6 +252,19 @@ dialog.wide{width:min(980px,calc(100% - 24px))}
 .p-sign{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:22px}
 .p-sign div{border-top:1px solid #333;padding-top:3px;font-size:10px;color:#555}
 
+/* ---- Rollen, Mannschaften, Kasse ---- */
+.rolebadge.sch{background:#203e35;color:var(--ok)}
+.rolebadge.tr{background:#24324d;color:#bcd4ff}
+button.rolebadge{border:1px dashed transparent;font-weight:600;cursor:pointer}
+button.rolebadge.off{background:transparent;color:var(--muted);border-color:var(--line)}
+.teamchecks{display:flex;flex-wrap:wrap;gap:4px 16px}
+.teamchecks label{margin-top:6px}
+.trainermark{font-size:12px;color:#bcd4ff;white-space:nowrap}
+.unassigned{color:#ffedaa;font-size:12px}
+.k-in{color:var(--ok)}.k-out{color:#ffacb2}
+tr.storno td{opacity:.55}tr.storno td .money{text-decoration:line-through}
+.teamhead{margin:22px 0 10px}
+
 #printArea{display:none}
 @media print{
   @page{size:A4;margin:0}
