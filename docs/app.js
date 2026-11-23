@@ -437,7 +437,7 @@ function teamsCard() {
   return `<details class="card" style="margin-bottom:14px"${teams.length && !teamsUnassigned.length ? "" : " open"}><summary><b>Mannschaftsliste</b> <span class="muted small">${teams.filter(t => t.aktiv).length} aktiv${teamsUnassigned.length ? ` · ⚠ ${teamsUnassigned.length} Werte nicht zugeordnet` : ""}</span></summary>
     <div class="tablewrap" style="margin-top:10px"><table class="table"><thead><tr><th>Mannschaft</th><th>Sortierung</th><th>Mitglieder</th><th>Eltern</th><th>WhatsApp-Gruppe</th><th>Status</th><th></th></tr></thead><tbody>
       ${teams.map(t => `<tr><td><b>${esc(t.name)}</b></td><td>${t.sortierung}</td><td>${members.filter(m => m.mannschaft_id === t.id).length}</td><td>${parents.filter(p => p.mannschaft_id === t.id).length}</td>
-        <td>${t.whatsapp_link ? "✓ Link hinterlegt" : '<span class="lock">–</span>'}</td>
+        <td><button class="quiet" data-walink="${esc(t.id)}">${t.whatsapp_link ? "✓ Link ändern" : "＋ Link eintragen"}</button></td>
         <td>${t.aktiv ? "aktiv" : '<span class="lock">inaktiv</span>'}</td><td><button class="quiet" data-teamedit="${esc(t.id)}">Ändern</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">Noch keine Mannschaften.</td></tr>'}
     </tbody></table></div>
     <div class="actions"><button class="quiet" data-act="addTeam">＋ Mannschaft</button></div>
@@ -459,6 +459,16 @@ function editTeam(id) {
   if (wa === null) return;
   const aktiv = t ? confirm(`Soll „${name.trim()}“ aktiv sein?\n\nOK = aktiv · Abbrechen = inaktiv (bleibt erhalten, ist aber nicht mehr auswählbar)`) : true;
   teamApi(t ? "/api/mannschaften/" + t.id : "/api/mannschaften", t ? "PUT" : "POST", { name: name.trim(), sortierung: Number(sort) || 0, aktiv, whatsapp_link: wa.trim() }, "Mannschaftsliste gespeichert.");
+}
+
+// WhatsApp-Gruppenlink einer Mannschaft direkt eintragen/ändern/entfernen
+function editWaLink(id) {
+  const t = teams.find(x => x.id === id); if (!t) return;
+  const wa = prompt(`WhatsApp-Gruppenlink für „${t.name}“:\n\nSo bekommst du ihn: WhatsApp öffnen → Gruppe → oben auf den Gruppennamen tippen → „Per Link einladen“ → „Link kopieren“. Dann hier einfügen.\n\nEr sieht so aus: https://chat.whatsapp.com/AbCdEf123…\nFeld leeren = Link entfernen.`, t.whatsapp_link || "");
+  if (wa === null) return;
+  const link = wa.trim();
+  if (link && !/^https:\/\/chat\.whatsapp\.com\/[A-Za-z0-9]{10,40}$/.test(link)) return notice("Das ist kein WhatsApp-Gruppenlink. Er muss mit https://chat.whatsapp.com/ beginnen.");
+  teamApi("/api/mannschaften/" + t.id, "PUT", { name: t.name, sortierung: t.sortierung, aktiv: !!t.aktiv, whatsapp_link: link }, link ? `WhatsApp-Link für ${t.name} gespeichert.` : `WhatsApp-Link für ${t.name} entfernt.`);
 }
 
 function renderMembers() {
@@ -505,11 +515,18 @@ function exportMembersCsv() {
 
 /* ---------------- Eltern-Verteiler ---------------- */
 function parentsPanel() {
-  // WhatsApp-Gruppen der Mannschaften (kostenlos über Einladungslink) – für alle, die Elternkommunikation sehen
-  const wa = teams.filter(t => t.aktiv && t.whatsapp_link);
-  const waCard = wa.length ? `<section class="card parentsbox"><h3>WhatsApp-Gruppen der Mannschaften</h3>
-    <p class="muted small" style="margin:4px 0 8px">Öffnet die Gruppe in WhatsApp. Eine Nachricht unten mit „Per WhatsApp teilen“ an die Gruppe weiterleiten.</p>
-    <div class="actions">${wa.map(waButton).join("")}</div></section>` : "";
+  // WhatsApp-Gruppen der Mannschaften (kostenlos über Einladungslink) – für alle, die Elternkommunikation sehen;
+  // wer die Mannschaftsliste pflegt, trägt hier direkt die Links ein
+  const edit = !!D().mannschaften_pflegen, active = teams.filter(t => t.aktiv), wa = active.filter(t => t.whatsapp_link);
+  const waCard = edit ? `<section class="card parentsbox"><h3>WhatsApp-Gruppen der Mannschaften</h3>
+      <p class="muted small" style="margin:4px 0 8px">Pro Mannschaft den Einladungslink der WhatsApp-Gruppe eintragen. Danach gibt es hier und bei „Meine Mannschaft“ den Knopf zum Öffnen der Gruppe.</p>
+      ${active.length ? `<div class="walist">${active.map(t => `<div class="warow"><b>${esc(t.name)}</b>
+        <div class="actions" style="margin:0">${t.whatsapp_link ? waButton(t) : '<span class="lock">noch kein Link</span>'}
+        <button class="quiet" data-walink="${esc(t.id)}">${t.whatsapp_link ? "Link ändern" : "＋ WhatsApp-Link eintragen"}</button></div></div>`).join("")}</div>`
+        : `<p class="muted">Noch keine Mannschaften. Lege sie zuerst unter <b>Mitglieder → Mannschaftsliste</b> an.</p>`}</section>`
+    : wa.length ? `<section class="card parentsbox"><h3>WhatsApp-Gruppen der Mannschaften</h3>
+      <p class="muted small" style="margin:4px 0 8px">Öffnet die Gruppe in WhatsApp. Eine Nachricht unten mit „Per WhatsApp teilen“ an die Gruppe weiterleiten.</p>
+      <div class="actions">${wa.map(waButton).join("")}</div></section>` : "";
   if (!D().eltern_alle && !D().eltern_team) return waCard;
   const ro = !D().eltern_alle, ok = parents.filter(p => p.einwilligung).length;
   const rows = parents.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.kind)}</td><td>${ro ? esc(teamName(p.mannschaft_id) || p.mannschaft) : teamCell(p)}</td><td class="wrap">${esc(p.email)}</td>
@@ -1895,18 +1912,28 @@ function chatHomeCard(always) {
 }
 function renderChat() {
   if (pendingRoom) { const id = pendingRoom; pendingRoom = null; return openRoom(id); }
+  window.scrollTo(0, 0);
   const mine = chatRooms.filter(r => r.mitglied), manage = chatRooms.filter(r => !r.mitglied && r.verwalten);
   const item = r => `<button class="roomitem${chatOpen === r.id ? " on" : ""}" data-room="${esc(r.id)}"><span><b>${esc(r.name)}</b><small>${esc(r.beschreibung || (r.alle ? "Alle angemeldeten" : ""))}</small></span>
     <span class="roombadges">${r.erwaehnt ? '<span class="count at">@</span>' : ""}${r.ungelesen ? `<span class="count unread">${r.ungelesen}</span>` : ""}</span></button>`;
   $("view").innerHTML = `<div class="chat${chatOpen ? " open" : ""}">
-    <aside class="roomlist"><div class="sectionhead" style="margin:0 0 8px"><h2>Chat</h2></div>
+    <div class="roomlist"><div class="sectionhead" style="margin:0 0 8px"><h2>Chat</h2></div>
       ${mine.map(item).join("") || '<p class="muted small">Du bist in keinem Raum Mitglied.</p>'}
       ${manage.length ? `<p class="muted small" style="margin:14px 0 4px">Von dir verwaltet, du bist kein Mitglied (Nachrichten nicht lesbar):</p>
         ${manage.map(r => `<div class="roomitem off"><span><b>${esc(r.name)}</b></span><button class="quiet" data-roomedit="${esc(r.id)}">Verwalten</button></div>`).join("")}` : ""}
-    </aside>
+    </div>
     <section class="room" id="room">${chatOpen ? "" : '<p class="muted" style="padding:20px">Wähle links einen Raum.</p>'}</section></div>`;
+  sizeChat();
   if (chatOpen) renderRoom();
 }
+// Chat passt sich dem Platz an: schmal (Handy, iPad hochkant mit Seitenleiste) = eine Spalte mit ‹ zurück;
+// Höhe so, dass Menü/Reiter oben und das Eingabefeld unten immer sichtbar bleiben – ohne die Seite zu verschieben
+function sizeChat() {
+  const c = document.querySelector(".chat"); if (!c) return;
+  c.classList.toggle("narrow", c.clientWidth < 700);
+  c.style.height = Math.max(340, window.innerHeight - c.getBoundingClientRect().top - 12) + "px";
+}
+window.addEventListener("resize", () => { if (document.querySelector(".chat")) { const box = $("msgs"), bottom = box && box.scrollHeight - box.scrollTop - box.clientHeight < 80; sizeChat(); if (bottom) box.scrollTop = box.scrollHeight; } });
 function msgHtml(m) {
   const own = m.benutzer_id === me.id;
   const text = esc(m.text).replace(/(^|\s)(@[\wÄÖÜäöüß.\-]+(?: [\wÄÖÜäöüß.\-]+)?)/g, (all, sp, at) => `${sp}<mark class="${me.anzeigename && at.slice(1).toLowerCase().startsWith(me.anzeigename.toLowerCase().split(" ")[0]) ? "me" : ""}">${at}</mark>`).replace(/\n/g, "<br>");
@@ -1921,9 +1948,8 @@ function renderRoom() {
     <div class="msgs" id="msgs">${chatMsgs.map(msgHtml).join("") || '<p class="muted" style="padding:12px">Noch keine Nachrichten. Schreib die erste!</p>'}</div>
     <form class="composer" id="composer"><textarea id="chatText" rows="2" maxlength="4000" placeholder="Nachricht schreiben … (@Name erwähnt jemanden)" aria-label="Nachricht"></textarea>
       <button id="chatSend">Senden</button></form>`;
+  sizeChat();
   const box = $("msgs"); box.scrollTop = box.scrollHeight;
-  // Handy: Raum (mit Eingabefeld) ganz ins Bild holen
-  if (matchMedia("(max-width:780px)").matches) el.scrollIntoView({ block: "start" });
   $("composer").onsubmit = e => { e.preventDefault(); sendMsg(); };
   $("chatText").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); sendMsg(); } };
 }
@@ -2064,6 +2090,7 @@ document.addEventListener("click", async e => {
   if (ds.roomedit) return editRoom(ds.roomedit);
   if (ds.msgedit) return editMsg(Number(ds.msgedit));
   if (ds.msgdel) return deleteMsg(Number(ds.msgdel));
+  if (ds.walink) return editWaLink(ds.walink);
   if (ds.teamedit) return editTeam(ds.teamedit);
   if (ds.beleg) return openBeleg(ds.beleg);
   if (ds.kbeleg) { belegFor = ds.kbeleg; return $("kasseBelegFile").click(); }
