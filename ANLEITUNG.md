@@ -9,25 +9,37 @@ Browser ──► GitHub Pages (docs/)          nur Oberfläche, keine Daten
                  └──► D1 / SQLite (EU)    Einträge, Dokumente, Benutzer, Protokoll
 ```
 
-## Rollen
+## Rollen, Funktionen und Rechte (ab Version 6)
 
-| | Vorstand | Ausschuss | Trainer |
-|---|---|---|---|
-| Satzung & Beschlüsse, Vorstand & Ausschuss, Gründungsplan, Offene Entscheidungen | lesen + bearbeiten | **unsichtbar** | **unsichtbar** |
-| Beiträge & Ehrenamt, Mannschaften, Elternkommunikation, Sponsoren, Kalender | lesen + bearbeiten | lesen + bearbeiten | nur Einträge mit „🏃 Für Trainer sichtbar“ (ggf. nur seiner Mannschaft), nur lesen + zu-/absagen |
-| Mitglieder | lesen + bearbeiten | lesen + bearbeiten | nur seine Mannschaft(en): Vorname, Nachname, Alter, Status |
-| Eltern-Verteiler | lesen + bearbeiten | lesen + bearbeiten | nur seine Mannschaft(en), nur lesen, E-Mail an Eltern (BCC) |
-| Downloads, Rechnungen | ✓ | ✓ (Rechnung stornieren nur Vorstand) | **unsichtbar** |
-| Kasse | lesen (schreiben nur mit Schatzmeister-Recht) | **unsichtbar** | **unsichtbar** |
-| Einträge, Mitglieder, Downloads löschen | ✓ | ✗ | ✗ |
-| Dokumente, Änderungsprotokoll, JSON-Sicherung | ✓ | **unsichtbar** | **unsichtbar** |
+Jedes Konto hat **eine Grundrolle** und **beliebig viele Vereinsfunktionen**:
 
-**Zusatzrechte (nur für Vorstand, beliebig kombinierbar):**
+- **Grundrollen:** Vorstand · Ausschuss · Trainer · Helfer (ohne Gremium, z. B. Festwirt-Team)
+- **Funktionen** (Startliste, Admins können eigene anlegen, umbenennen, deaktivieren):
+  - *Vorstand:* 1./2. Vorsitzende/r, Schatzmeister/in (Kassenwart), Schriftführer/in, Jugendleiter/in, Sportliche Leitung, Mitgliederverwaltung
+  - *Ausschuss:* Ausschussbeisitzer/in, Pressewart/Öffentlichkeitsarbeit, Sponsoring-Beauftragte/r, Ehrenamtskoordination, Platz- und Gerätewart, Schiedsrichter-Obmann, Elternvertreter/in, Datenschutzbeauftragte/r, Kassenprüfer/in
+  - *Sport:* Trainer/in, Co-Trainer/in, Betreuer/in · *Fest:* Festwirt/in (Leitung), Festwirt-Team
+- **Admin** ist ein Zusatzrecht (nur mit Grundrolle Vorstand): Benutzer, Funktionen, Rechte, Chat-Räume – und überall alle Rechte.
 
-- **Admin:** Benutzer anlegen, Rollen vergeben, Passwörter zurücksetzen, deaktivieren.
-- **Schatzmeister:** in der Kasse buchen, stornieren, Belege anhängen, Kasse einstellen. In *Benutzer* mit einem Klick auf das Feld „Schatzmeister“ an- bzw. ausschalten.
+**Rechte-Matrix** (*Benutzer → Rechte*, nur Admins): Für jede Grundrolle und Funktion × jeden Bereich gibt es eine Stufe:
+**– keine** (Bereich ist komplett unsichtbar – auch in Menü, Suche, Kalender, Übersicht, Export) · **L lesen** · **B bearbeiten** · **X löschen**.
+Wer mehrere Funktionen hat, bekommt die **höchste** Stufe. Änderungen wirken sofort. Bereiche: die 9 bisherigen, **Festwirtschaft**, Mitglieder, Downloads, Dokumente, Änderungsprotokoll.
 
-Ausschuss und Trainer können nie Admin oder Schatzmeister sein. Registrieren kann sich niemand selbst – nur Admins legen Konten an. Beim Trainer wählt der Admin die **Mannschaften** aus (ein Trainer kann mehrere haben).
+Startwerte: Vorstand wie bisher (alles, Festwirtschaft lesen) · Ausschuss wie bisher · Festwirt/in: Festwirtschaft löschen · Festwirt-Team: Festwirtschaft bearbeiten · Jugendleiter/in: Mannschaften, Elternkommunikation, Mitglieder bearbeiten · Mitgliederverwaltung: Mitglieder löschen · Sponsoring-Beauftragte/r: Sponsoren · Ehrenamtskoordination: Beiträge & Ehrenamt · Pressewart: Downloads.
+
+**Feste Regeln** (nicht über die Matrix änderbar, der Server erzwingt sie):
+
+| Regel | Wer |
+|---|---|
+| **Rechnungen und Kasse** | nur Admins und Schatzmeister/in (anlegen, buchen). **Stornieren nur Schatzmeister/in.** Kassenprüfer/in nur lesen, wenn unter *Rechte* eingeschaltet (Standard: aus) |
+| Benutzer, Funktionen, Rechte-Matrix, JSON-Sicherung | nur Admins |
+| Vorstandsbereiche (Satzung, Vorstand, Gründungsplan, Entscheidungen, Dokumente, Protokoll) | nie für Trainer, Co-Trainer, Betreuer, Festwirt-Team, Helfer (in der Matrix grau) |
+| **Eltern-Kontakte** | nur Admins, Jugendleiter/in und Trainer/Co-Trainer/Betreuer der jeweiligen Mannschaft – E-Mails nur mit Einwilligung |
+| Trainer-Weg | Einträge mit „🏃 Für Trainer sichtbar“ (ggf. nur eine Mannschaft) + eigene Mannschaft (Vorname, Nachname, Alter, Status) |
+
+Was jemand nicht lesen darf, liefert der Server mit **404 „Nicht gefunden“** (die Existenz wird nicht verraten). Lesen erlaubt, aber nicht bearbeiten → 403.
+Registrieren kann sich niemand selbst – nur Admins (und für ihr Team der Festwirt) legen Konten an.
+
+**Festwirt/in (Leitung)** hat den Reiter **Mein Team**: Konten anlegen, deaktivieren, Passwort zurücksetzen – aber **nur** für Konten mit Grundrolle Helfer und genau der Funktion Festwirt-Team (beliebig viele). Er sieht nur diese Konten. Das Festwirt-Team selbst darf niemanden anlegen. Im Protokoll steht, wer wen angelegt hat.
 
 ---
 
@@ -98,8 +110,8 @@ Als Admin anmelden → **Benutzer** → **＋ Benutzer** → Rolle wählen. Die 
 - **Wer sieht was?** Im Eintrag-Fenster steht, ob nur der Vorstand (🔒) oder auch der Ausschuss (👥) den Eintrag sieht. Termine für alle gehören in den Bereich **Kalender**. Achtung: Der Bereich „Vorstand & Ausschuss“ ist trotz seines Namens **nur für den Vorstand** sichtbar.
 - **Zu- und Absagen:** Mit dem Häkchen *Rückmeldung erwünscht* bekommt ein Eintrag die Knöpfe *✓ Ich nehme teil / ? Vielleicht / ✗ Leider nicht*. Im aufklappbaren Bereich darunter steht, wer zugesagt hat und wer noch nicht geantwortet hat. Offene Antworten erscheinen auf der **Übersicht** unter *Deine Rückmeldung fehlt*. Ein zweiter Klick auf die eigene Antwort nimmt sie zurück.
 
-- **Downloads** (Vorstand + Ausschuss, nur nach Login): Dateien in den Kategorien Formulare, Sponsoren, Logos & Werbematerial, Sonstiges hochladen. Löschen darf nur der Vorstand. Fertig eingebaut: **Mitgliedsantrag** (mit SEPA-Mandat, Einwilligungen; zum Drucken oder als PDF) und **Logo-Paket**. Hinweis: Das vorhandene Logo hat nur 400 × 400 Pixel. Für Druckereien eine Vektordatei (SVG/PDF/EPS) vom Designer besorgen und hochladen.
-- **Rechnungen / Rechnung erstellen** (Vorstand + Ausschuss): Die Rechnungsnummer **SKU-Jahr-laufende Nummer** (z. B. SKU-2026-0001) wird beim Erstellen automatisch und lückenlos vergeben und kann nicht geändert werden. Fest sind außerdem Vereinsname und Logo. Alles andere ist frei: Empfänger, Positionen, MwSt.-Satz je Position (auch 0 %), Zahlungsziel, Texte, Absender, Bank, Ersteller. Die Standardwerte stehen unter **Vereinsdaten & Vorlage**. Rechnungen werden nie gelöscht. Sie werden nur **storniert** (nur Vorstand), denn so verlangt es die Buchhaltung. *Drucken / als PDF speichern* erzeugt eine A4-Rechnung. Im Druckfenster „Als PDF speichern“ wählen.
+- **Downloads** (laut Rechte-Matrix, Standard: Vorstand + Ausschuss, nur nach Login): Dateien in den Kategorien Formulare, Sponsoren, Logos & Werbematerial, Sonstiges hochladen. Löschen darf nur der Vorstand. Fertig eingebaut: **Mitgliedsantrag** (mit SEPA-Mandat, Einwilligungen; zum Drucken oder als PDF) und **Logo-Paket**. Hinweis: Das vorhandene Logo hat nur 400 × 400 Pixel. Für Druckereien eine Vektordatei (SVG/PDF/EPS) vom Designer besorgen und hochladen.
+- **Rechnungen / Rechnung erstellen** (ab Version 6: nur Admins und Schatzmeister/in): Die Rechnungsnummer **SKU-Jahr-laufende Nummer** (z. B. SKU-2026-0001) wird beim Erstellen automatisch und lückenlos vergeben und kann nicht geändert werden. Fest sind außerdem Vereinsname und Logo. Alles andere ist frei: Empfänger, Positionen, MwSt.-Satz je Position (auch 0 %), Zahlungsziel, Texte, Absender, Bank, Ersteller. Die Standardwerte stehen unter **Vereinsdaten & Vorlage**. Rechnungen werden nie gelöscht. Sie werden nur **storniert** (nur Vorstand), denn so verlangt es die Buchhaltung. *Drucken / als PDF speichern* erzeugt eine A4-Rechnung. Im Druckfenster „Als PDF speichern“ wählen.
 
 ## Mannschaftsliste, Trainer, Kasse
 
@@ -118,6 +130,23 @@ npx.cmd wrangler deploy                                        # neuer Server
 
 Danach die Seite (Ordner `docs/`) zu GitHub hochladen. Die Migration behält alle Konten, Anmeldungen und Zusagen und legt aus den vorhandenen Mannschafts-Namen die Mannschaftsliste an.
 
+## Chat, Festwirtschaft, WhatsApp (ab Version 6)
+
+- **Chat** (Reiter *Chat*): Räume mit Name und Beschreibung. Mitglied ist, wer zur gewählten Grundrolle oder Funktion gehört oder einzeln eingetragen ist (oder „alle angemeldeten“). Wer kein Mitglied ist, sieht den Raum gar nicht.
+  - Standardräume: *Alle – Beschlüsse & Infos*, *Vorstand*, *Ausschuss*, *Trainer* (Trainer, Co-Trainer, Betreuer), *Festwirtschaft* (Festwirt/in + Festwirt-Team).
+  - Räume anlegen: Admins (alle Räume) · Festwirt/in (nur Räume für sein Festwirt-Team). **Admins verwalten Räume, lesen Nachrichten aber nur, wenn sie selbst Mitglied sind.**
+  - Eigene Nachricht bearbeiten/löschen; Raum-Admin (Ersteller bzw. Admin, der Mitglied ist) darf Nachrichten entfernen. Ungelesen-Zähler im Menü und je Raum, **@Name** wird hervorgehoben. Max. 4000 Zeichen, keine Dateien (dafür Downloads/Dokumente nutzen).
+  - Neue Nachrichten werden alle 5 Sekunden abgeholt (offener Chat), die Zähler alle 30 Sekunden – kostenlos, ohne Zusatzdienste.
+  - **Aufbewahrung:** Nachrichten älter als 12 Monate löscht der Server automatisch (täglich um 3:17 Uhr UTC, Cron Trigger in `wrangler.toml`). Chat-Nachrichten sind bewusst **nicht** in der JSON-Sicherung.
+- **Festwirtschaft:** eigener Bereich für Planung, Einkauf, Schichtplan, Helferliste (Einträge mit Datum erscheinen im Kalender).
+- **WhatsApp – kostenlos, ohne WhatsApp Business:**
+  - In der **Mannschaftsliste** pro Mannschaft den **Gruppen-Einladungslink** hinterlegen (WhatsApp → Gruppe → Gruppeninfo → *Per Link einladen* → Link kopieren, Form `https://chat.whatsapp.com/…`).
+  - Knopf **„💬 WhatsApp-Gruppe …“** in Elternkommunikation und *Meine Mannschaft* öffnet die Gruppe.
+  - **„💬 Per WhatsApp teilen“** an jeder Nachricht der Elternkommunikation öffnet WhatsApp mit dem fertigen Text.
+  - **„✉ Per E-Mail an Eltern“** öffnet das eigene E-Mail-Programm, alle Empfänger im **BCC**.
+- **Eltern-E-Mails nur mit Einwilligung:** Häkchen + Datum im Eltern-Fenster. Ohne Einwilligung keine E-Mail und für Trainer unsichtbar. Am besten gar keine Kontaktdaten speichern und nur die WhatsApp-Gruppenlinks nutzen.
+- **Handy:** große Knöpfe, Chat im Vollbild mit Zurück-Pfeil, Tabellen scrollen seitlich.
+
 **Datenschutz:** Mitglieder- und Elterndaten sind personenbezogen. Nur eintragen, was der Verein braucht. Ausgetretene Mitglieder auf Status *Ausgetreten* setzen oder löschen (lassen).
 
 ---
@@ -134,9 +163,27 @@ Danach die Seite (Ordner `docs/`) zu GitHub hochladen. Die Migration behält all
 100.000 Anfragen pro Tag, 5 Mio. Datenbank-Lesezugriffe und 100.000 Schreibzugriffe pro Tag, 5 GB Speicher. Für einen Verein reicht das bei weitem. Dateien sind auf 10 MB pro Dokument begrenzt.
 
 ## Sicherungen
-- **In der App:** Mein Konto → *Sicherung (JSON)* (nur Vorstand)
-- **Komplette SQL-Sicherung:** im Ordner `worker`: `npm run db:backup` → `backup.sql` (nicht ins Repository hochladen!)
-- **Zeitreise:** Cloudflare D1 kann die Datenbank im Free-Tarif auf jeden Zeitpunkt der letzten 7 Tage zurücksetzen: `npx wrangler d1 time-travel restore vereinszentrale --timestamp=...`
+- **In der App:** Mein Konto → *Sicherung (JSON)* (nur Admins)
+- **Komplette SQL-Sicherung:** im Ordner `worker`: `npm.cmd run db:backup` → `backup.sql` (nicht ins Repository hochladen! Enthält persönliche Daten.)
+- **Zeitreise (am einfachsten):** Cloudflare D1 kann die Datenbank im Free-Tarif auf jeden Zeitpunkt der letzten 7 Tage zurücksetzen: `npx.cmd wrangler d1 time-travel restore vereinszentrale --timestamp=...`
+- **SQL-Sicherung wieder einspielen:** Die Datei aus `wrangler d1 export` lässt sich **nicht direkt** einspielen (Tabellen in falscher Reihenfolge, große Dateien über der 100-KB-Grenze von D1). Deshalb vorher sortieren:
+
+  ```bash
+  node tools/sicherung-sortieren.mjs backup.sql backup_sortiert.sql
+  npx.cmd wrangler d1 execute vereinszentrale --local --file=backup_sortiert.sql   # erst lokal ausprobieren!
+  ```
+
+  Getestet: alle Tabellen, Konten, Anmeldungen und hochgeladenen Dateien kommen byte-genau zurück. In eine bestehende (nicht leere) Datenbank nicht einspielen – dafür die Zeitreise nutzen.
+
+**Migration auf Version 6** (einmalig, im Ordner `worker`, Reihenfolge einhalten):
+
+```bash
+npx.cmd wrangler d1 export vereinszentrale --remote --output=backup_vorher.sql   # Sicherung (nicht hochladen!)
+npx.cmd wrangler d1 migrations apply vereinszentrale --remote                    # Funktionen, Rechte, Chat …
+npx.cmd wrangler deploy                                                          # neuer Server + täglicher Cron
+```
+
+Danach `docs/` zu GitHub hochladen. Die Migration baut die Benutzertabelle neu auf und behält dabei alle Konten, Anmeldungen, Zusagen und Trainer-Zuordnungen. Das Schatzmeister-Recht wird zur Funktion „Schatzmeister/in“, Trainer bekommen die Funktion „Trainer/in“. **Achtung:** Vorstand ohne Admin und Ausschuss sehen danach **keine Rechnungen und keine Kasse** mehr (feste Regel), und Eltern-Kontakte nur noch Admins, Jugendleitung und Trainer.
 
 ## Eigene Domain (optional, ca. 5 €/Jahr)
 1. .de-Domain kaufen (z. B. INWX, netcup) und die Nameserver auf Cloudflare umstellen (Cloudflare → *Add a site*, kostenlos).

@@ -11,8 +11,8 @@
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <meta http-equiv="Cache-Control" content="no-cache">
-<link rel="stylesheet" href="style.css?v=5">
-<script src="config.js?v=5"></script>
+<link rel="stylesheet" href="style.css?v=6">
+<script src="config.js?v=6"></script>
 </head>
 <body>
 
@@ -153,13 +153,15 @@
     <div class="fields">
       <label>Benutzername<input name="benutzername" required autocapitalize="none" spellcheck="false" pattern="[a-zA-Z0-9._\-]{3,40}" title="3–40 Zeichen: a–z, 0–9, Punkt, Minus, Unterstrich"></label>
       <label>Anzeigename<input name="anzeigename" maxlength="80" placeholder="z. B. Max Mustermann"></label>
-      <label>Rolle<select name="rolle"><option value="ausschuss">Ausschuss</option><option value="vorstand">Vorstand</option><option value="trainer">Trainer</option></select></label>
+      <label>Grundrolle<select name="rolle"><option value="ausschuss">Ausschuss</option><option value="vorstand">Vorstand</option><option value="trainer">Trainer</option><option value="helfer">Helfer (ohne Gremium)</option></select></label>
       <div style="align-self:end">
-        <label class="check" id="adminWrap"><input type="checkbox" name="ist_admin"> Admin (Benutzerverwaltung)</label>
-        <label class="check" id="schatzWrap"><input type="checkbox" name="ist_schatzmeister"> Schatzmeister (schreibt in der Kasse)</label>
+        <label class="check" id="adminWrap"><input type="checkbox" name="ist_admin"> Admin (Benutzer, Rechte, alles)</label>
       </div>
     </div>
-    <fieldset class="adminblock" id="teamWrap"><legend>Mannschaften des Trainers</legend>
+    <fieldset class="adminblock"><legend>Funktionen (mehrere möglich)</legend>
+      <div id="funcChecks" class="funcchecks"></div>
+    </fieldset>
+    <fieldset class="adminblock" id="teamWrap"><legend>Mannschaften (Trainer/Co-Trainer/Betreuer)</legend>
       <div id="teamChecks" class="teamchecks"></div>
       <p class="muted small">Der Trainer sieht nur Mitglieder und Eltern dieser Mannschaften und nur Termine „Für Trainer sichtbar“.</p>
     </fieldset>
@@ -214,6 +216,11 @@
       <label>Mannschaft<select name="mannschaft_id"></select></label>
     </div>
     <label>Notiz<textarea name="notiz" rows="2" maxlength="1000"></textarea></label>
+    <div class="fields">
+      <label class="check" style="align-self:end"><input type="checkbox" name="einwilligung"> Einwilligung liegt vor (E-Mail darf genutzt werden)</label>
+      <label>Datum der Einwilligung<input name="einwilligung_datum" type="date"></label>
+    </div>
+    <p class="muted small">Ohne Einwilligung bekommt diese Adresse keine E-Mails, und Trainer sehen sie nicht. Am besten nur WhatsApp-Gruppenlinks nutzen.</p>
     <div id="parentError" class="err" role="alert"></div>
     <footer>
       <button type="button" id="parentRemove" class="quiet danger">Löschen</button>
@@ -308,6 +315,24 @@
   </form>
 </dialog>
 
+<!-- Chat-Raum -->
+<dialog id="roomEditor">
+  <form id="roomForm">
+    <h2 id="roomFormTitle">Raum</h2>
+    <label>Name<input name="name" required maxlength="80" placeholder="z. B. Sommerfest 2027"></label>
+    <label>Beschreibung<input name="beschreibung" maxlength="300"></label>
+    <label class="check" id="roomAlleWrap"><input type="checkbox" name="alle"> Alle angemeldeten Mitglieder der Vereinszentrale</label>
+    <fieldset class="adminblock"><legend>Wer ist Mitglied?</legend><div id="roomRules" class="funcchecks"></div></fieldset>
+    <label class="check"><input type="checkbox" name="aktiv" checked> Raum aktiv</label>
+    <p class="muted small" id="roomHint"></p>
+    <div id="roomError" class="err" role="alert"></div>
+    <footer>
+      <button type="button" class="quiet" data-close>Abbrechen</button>
+      <button>Speichern</button>
+    </footer>
+  </form>
+</dialog>
+
 <!-- Kasse: Buchung -->
 <dialog id="kasseEditor">
   <form id="kasseForm">
@@ -369,6 +394,6 @@
 <input id="importJson" type="file" accept=".json,application/json" hidden>
 <input id="kasseBelegFile" type="file" accept=".pdf,image/*" hidden>
 <div id="printArea"></div>
-<script src="app.js?v=5"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

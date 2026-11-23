@@ -2,3 +2,5 @@ node_modules
 .wrangler
 worker/.dev.vars
 backup.sql
+backup_*.sql
+*.sql.bak

@@ -16,3 +16,7 @@ migrations_dir = "migrations"
 
 [observability]
 enabled = true
+
+# Täglich um 03:17 UTC: Chat-Nachrichten älter als 12 Monate löschen (kostenlos im Free-Tarif)
+[triggers]
+crons = ["17 3 * * *"]

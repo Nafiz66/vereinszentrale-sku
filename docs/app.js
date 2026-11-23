@@ -5,7 +5,7 @@
 "use strict";
 
 const API = String(window.VZ_CONFIG?.API_URL || "").replace(/\/+$/, "");
-const GROUPS = ["Satzung & Beschlüsse","Vorstand & Ausschuss","Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender","Gründungsplan","Offene Entscheidungen"];
+const GROUPS = ["Satzung & Beschlüsse","Vorstand & Ausschuss","Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender","Gründungsplan","Offene Entscheidungen","Festwirtschaft"];
 const STATUSES = ["Bestätigt","Geplant","Entwurf","Offen","Schätzung","Erledigt"];
 const CLIENT_ITER = 250000;
 const IDLE_MINUTES = 60;
@@ -18,13 +18,19 @@ const fmtTime = iso => iso ? new Intl.DateTimeFormat("de-DE",{timeZone:"Europe/B
 const fmtBytes = n => n < 1024 ? n+" B" : n < 1048576 ? (n/1024).toFixed(0)+" KB" : (n/1048576).toFixed(1)+" MB";
 const options = (values, sel) => values.map(v => `<option${v===sel?" selected":""}>${esc(v)}</option>`).join("");
 const badge = s => s ? `<span class="badge" data-s="${esc(s)}">${esc(s)}</span>` : "";
-const ROLE = { vorstand: "Vorstand", ausschuss: "Ausschuss", trainer: "Trainer" };
-const rightsLabel = u => [ROLE[u.rolle], u.ist_admin && "Admin", u.ist_schatzmeister && "Schatzmeister"].filter(Boolean).join(" · ");
+const ROLE = { vorstand: "Vorstand", ausschuss: "Ausschuss", trainer: "Trainer", helfer: "Helfer" };
+const rightsLabel = u => [ROLE[u.rolle], u.ist_admin && "Admin", ...(u.funktionen || []).map(f => typeof f === "string" ? funcName(f) : f.name)].filter(Boolean).join(" · ");
+// Rechte kommen vom Server (/api/ich): Stufe je Bereich + feste Sonderrechte. Der Server prüft trotzdem jede Anfrage.
+const D = () => me?.darf || {};
+const lv = a => me?.rechte?.[a] || 0, canW = a => lv(a) >= 2, canD = a => lv(a) >= 3;
+let funktionen = [], chatRooms = [], teamUsers = [];
+const funcName = id => funktionen.find(f => f.id === id)?.name || "";
 let teams = [], teamsUnassigned = [], kasse = { buchungen: [], einstellungen: { kategorien: [] } };
 let kFilter = { q: "", jahr: "", monat: "", kategorie: "", art: "" }, kasseFromInvoice = null;
 
 const AUSSCHUSS_GROUPS = ["Beiträge & Ehrenamt","Mannschaften","Elternkommunikation","Sponsoren","Kalender"];
-const vorstandOnly = bereich => !AUSSCHUSS_GROUPS.includes(bereich);
+// „nur Vorstand“: laut Rechte-Matrix sieht nur die Grundrolle Vorstand (und Admins) diesen Bereich
+const vorstandOnly = bereich => { const s = me?.sichtbar?.[bereich] || []; return s.length > 0 && s.every(x => x === "Vorstand"); };
 const ANSWERS = [["ja", "✓ Ich nehme teil"], ["vielleicht", "? Vielleicht"], ["nein", "✗ Leider nicht"]];
 const MEMBER_STATUSES = ["Aktiv","Passiv","Ausgetreten"];
 const MAX_FILE = 10 * 1024 * 1024, MAX_IMPORT = 1000;
@@ -128,7 +134,8 @@ $("setupForm").onsubmit = e => { e.preventDefault(); busy(e.target, async () => 
 async function logout() {
   try { await api("/api/logout", { method: "POST" }); } catch {}
   clearToken(); me = null; entries = docs = users = members = parents = downloads = invoices = teams = teamsUnassigned = []; settings = {}; invDraft = null;
-  kasse = { buchungen: [], einstellungen: { kategorien: [] } }; showLogin("Du wurdest abgemeldet.");
+  kasse = { buchungen: [], einstellungen: { kategorien: [] } }; chatRooms = []; chatMsgs = []; chatOpen = null; teamUsers = []; clearInterval(chatTimer);
+  showLogin("Du wurdest abgemeldet.");
 }
 let idleTimer;
 function resetIdle() {
@@ -138,13 +145,26 @@ function resetIdle() {
 ["click","keydown"].forEach(ev => document.addEventListener(ev, resetIdle, { passive: true }));
 
 /* ---------------- App-Aufbau ---------------- */
-const isVorstand = () => me?.rolle === "vorstand";
-const isTrainer = () => me?.rolle === "trainer";
-const isSchatz = () => isVorstand() && !!me?.ist_schatzmeister;
+const isTrainer = () => !!D().trainer;            // Trainer/Co-Trainer/Betreuer (Mannschafts-Ansicht)
+const isSchatz = () => !!D().geld_schreiben;      // darf in Rechnungen/Kasse schreiben (Admin, Schatzmeister/in)
+const readable = () => GROUPS.filter(g => lv(g) >= 1);
+const writable = () => GROUPS.filter(g => lv(g) >= 2);
+// Navigation komplett aus den Rechten: was man nicht lesen darf, gibt es nicht
 function buildSections() {
-  if (isTrainer()) { sections = ["Übersicht", "Kalender", "Mannschaften", "Elternkommunikation", "Mein Konto"]; return; }
-  sections = ["Übersicht", ...GROUPS.filter(g => me.bereiche.includes(g)), "Mitglieder", "Downloads", ...(isVorstand() ? ["Kasse"] : []), "Rechnungen", "Rechnung erstellen"];
-  if (isVorstand()) sections.push("Dokumente", "Änderungsprotokoll");
+  const groups = readable();
+  // Kalender auch für Trainer und Festwirtschaft (zeigt alle Termine, die man sehen darf)
+  if (!groups.includes("Kalender") && (isTrainer() || lv("Festwirtschaft") >= 1)) groups.splice(0, 0, "Kalender");
+  if (!groups.includes("Elternkommunikation") && (isTrainer() || D().eltern_alle)) groups.push("Elternkommunikation");
+  sections = ["Übersicht", ...GROUPS.filter(g => groups.includes(g))];
+  if (isTrainer() && (me.mannschaften || []).length) sections.push("Meine Mannschaft");
+  if (lv("Mitglieder") >= 1) sections.push("Mitglieder");
+  if (lv("Downloads") >= 1) sections.push("Downloads");
+  sections.push("Chat");
+  if (D().geld_lesen) sections.push("Kasse", "Rechnungen");
+  if (D().geld_schreiben) sections.push("Rechnung erstellen");
+  if (lv("Dokumente") >= 1) sections.push("Dokumente");
+  if (lv("Änderungsprotokoll") >= 1) sections.push("Änderungsprotokoll");
+  if (D().team_verwalten) sections.push("Mein Team");
   if (me.ist_admin) sections.push("Benutzer");
   sections.push("Mein Konto");
 }
@@ -153,22 +173,29 @@ const route = i => i ? "#bereich-" + i : "#start";
 
 async function startApp() {
   $("authScreen").hidden = true; $("appScreen").hidden = false;
+  me = (await api("/api/ich")).benutzer;   // aktuelle Rechte (Grundrolle + Funktionen + Matrix)
   buildSections();
   $("userName").textContent = me.anzeigename;
   $("userRole").textContent = rightsLabel(me);
-  $("heroText").textContent = isVorstand() ? "Gründung, Aufgaben und Termine an einem Ort." : isTrainer() ? "Deine Termine, deine Mannschaft und die Eltern an einem Ort." : "Mannschaften, Termine und Elternkommunikation an einem Ort.";
+  $("heroText").textContent = lv("Gründungsplan") >= 1 ? "Gründung, Aufgaben und Termine an einem Ort." : isTrainer() ? "Deine Termine, deine Mannschaft und die Eltern an einem Ort."
+    : lv("Festwirtschaft") >= 1 && readable().length === 1 ? "Planung, Einkauf und Schichten für unsere Feste." : "Termine, Aufgaben und Austausch an einem Ort.";
   resetIdle();
   await reload();
+  startChatPolling();
 }
 async function reload() {
   try {
     const jobs = [api("/api/eintraege").then(r => entries = r.eintraege),
-      api("/api/mitglieder").then(r => members = r.liste), api("/api/eltern").then(r => parents = r.liste),
-      api("/api/mannschaften").then(r => { teams = r.mannschaften; teamsUnassigned = r.nicht_zugeordnet || []; })];
-    if (!isTrainer()) jobs.push(api("/api/downloads").then(r => downloads = r.downloads), api("/api/rechnungen").then(r => invoices = r.rechnungen),
-      api("/api/einstellungen").then(r => settings = r));
-    if (isVorstand()) jobs.push(api("/api/dokumente").then(r => docs = r.dokumente), api("/api/kasse").then(r => kasse = r));
+      api("/api/mannschaften").then(r => { teams = r.mannschaften; teamsUnassigned = r.nicht_zugeordnet || []; }),
+      api("/api/funktionen").then(r => funktionen = r.funktionen), api("/api/chat").then(r => chatRooms = r.raeume)];
+    if (lv("Mitglieder") >= 1 || isTrainer()) jobs.push(api("/api/mitglieder").then(r => members = r.liste));
+    if (D().eltern_alle || D().eltern_team) jobs.push(api("/api/eltern").then(r => parents = r.liste));
+    if (lv("Downloads") >= 1) jobs.push(api("/api/downloads").then(r => downloads = r.downloads));
+    if (D().vereinsdaten) jobs.push(api("/api/einstellungen").then(r => settings = r));
+    if (D().geld_lesen) jobs.push(api("/api/rechnungen").then(r => invoices = r.rechnungen), api("/api/kasse").then(r => kasse = r));
+    if (lv("Dokumente") >= 1) jobs.push(api("/api/dokumente").then(r => docs = r.dokumente));
     if (me.ist_admin) jobs.push(api("/api/benutzer").then(r => users = r.benutzer));
+    if (D().team_verwalten) jobs.push(api("/api/team").then(r => teamUsers = r.benutzer));
     await Promise.all(jobs);
     render();
   } catch (e) { $("view").innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
@@ -180,7 +207,8 @@ function renderNav() {
   const c = {}; for (const r of entries) if (r.status !== "Erledigt") c[r.bereich] = (c[r.bereich] || 0) + 1;
   $("nav").innerHTML = sections.map((s, i) => {
     const sep = ["Mitglieder","Dokumente","Benutzer","Mein Konto"].includes(s) && !["Mitglieder","Dokumente","Benutzer"].includes(sections[i-1]) ? '<div class="navsep"></div>' : "";
-    const n = c[s] && !isTrainer() ? `<span class="count">${c[s]}</span>` : "";
+    const unread = s === "Chat" ? chatRooms.reduce((a, r) => a + (r.ungelesen || 0), 0) : 0;
+    const n = s === "Chat" ? (unread ? `<span class="count unread">${unread}</span>` : "") : c[s] && lv(s) >= 1 ? `<span class="count">${c[s]}</span>` : "";
     return `${sep}<a href="${route(i)}"${i===section?' aria-current="page"':""}>${esc(s)}${n}</a>`;
   }).join("");
 }
@@ -190,17 +218,17 @@ function card(r, showGroup = false) {
   const body = r.inhalt ? `<p class="body">${esc(r.inhalt)}</p>` : "";
   const parent = r.bereich === "Elternkommunikation";
   const files = (r.anhaenge || []).map(a => `<button class="quiet chip" data-att="${esc(a.id)}" title="${esc(a.dateiname)} öffnen">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>`).join("");
-  let lock = isVorstand() && vorstandOnly(r.bereich) ? ' <span class="lockmark" title="Der Ausschuss sieht diesen Eintrag nicht">🔒 nur Vorstand</span>' : "";
-  if (r.fuer_trainer && !isTrainer()) lock += ` <span class="trainermark" title="Trainer sehen diesen Eintrag">🏃 ${esc(teamName(r.mannschaft_id) || "alle Trainer")}</span>`;
+  let lock = vorstandOnly(r.bereich) ? ' <span class="lockmark" title="Nur der Vorstand (und Admins) sieht diesen Bereich">🔒 nur Vorstand</span>' : "";
+  if (r.fuer_trainer && canW(r.bereich)) lock += ` <span class="trainermark" title="Trainer sehen diesen Eintrag">🏃 ${esc(teamName(r.mannschaft_id) || "alle Trainer")}</span>`;
   return `<article class="card">${showGroup ? `<div class="meta">${esc(r.bereich)}${lock}</div>` : ""}<div class="cardtop"><h3>${esc(r.titel)}${showGroup ? "" : lock}</h3>${badge(r.status)}</div>
     ${meta ? `<div class="meta">${meta}</div>` : ""}
     ${r.inhalt.length > 1700 ? `<details><summary>Volltext anzeigen</summary>${body}</details>` : body}
     ${files ? `<div class="attachments">${files}</div>` : ""}
     ${r.rueckmeldung ? rsvpBlock(r) : ""}
     <div class="actions">
-      ${isTrainer() ? "" : `<button class="quiet" data-edit="${esc(r.id)}">Bearbeiten</button>`}
-      ${!isTrainer() && !["Erledigt","Bestätigt"].includes(r.status) ? `<button class="quiet" data-done="${esc(r.id)}">✓ Erledigt</button>` : ""}
-      ${parent ? `<button class="quiet" data-mail="${esc(r.id)}">✉ Per E-Mail an Eltern</button><button class="quiet" data-copy="${esc(r.id)}">Text kopieren</button><a class="btnlink quiet" target="_blank" rel="noopener noreferrer" href="https://wa.me/?text=${encodeURIComponent(r.inhalt)}">Per WhatsApp teilen</a>` : ""}
+      ${canW(r.bereich) ? `<button class="quiet" data-edit="${esc(r.id)}">Bearbeiten</button>` : ""}
+      ${canW(r.bereich) && !["Erledigt","Bestätigt"].includes(r.status) ? `<button class="quiet" data-done="${esc(r.id)}">✓ Erledigt</button>` : ""}
+      ${parent ? `${D().eltern_alle || D().eltern_team ? `<button class="quiet" data-mail="${esc(r.id)}">✉ Per E-Mail an Eltern</button>` : ""}<button class="quiet" data-copy="${esc(r.id)}">Text kopieren</button><a class="btnlink wa" target="_blank" rel="noopener noreferrer" href="https://wa.me/?text=${encodeURIComponent((r.titel ? r.titel + "\n\n" : "") + r.inhalt)}">💬 Per WhatsApp teilen</a>` : ""}
     </div></article>`;
 }
 const myAnswer = r => (r.zusagen || []).find(z => z.benutzer_id === me.id)?.antwort || "";
@@ -239,11 +267,17 @@ function render(reset = false) {
   const name = sections[section];
   $("hero").hidden = section !== 0;
   $("crumb").textContent = section ? name : "Vereinszentrale";
-  $("add").hidden = isTrainer() || ["Änderungsprotokoll","Mein Konto","Rechnung erstellen"].includes(name) || (name === "Kasse" && !isSchatz());
-  $("add").textContent = { Dokumente: "＋ Dokument", Benutzer: "＋ Benutzer", Mitglieder: "＋ Mitglied", Downloads: "＋ Datei hochladen", Rechnungen: "＋ Rechnung erstellen", Kasse: "＋ Buchung" }[name] || "＋ Eintrag";
+  // „＋“ nur, wo man auch anlegen darf
+  const addOk = { "Übersicht": writable().length > 0, Kalender: writable().length > 0, Mitglieder: canW("Mitglieder"), Downloads: canW("Downloads"), Dokumente: canW("Dokumente"),
+    Kasse: isSchatz(), Rechnungen: isSchatz(), Benutzer: !!me.ist_admin, "Mein Team": !!D().team_verwalten, Chat: !!D().raeume_anlegen }[name] ?? (GROUPS.includes(name) && canW(name));
+  $("add").hidden = !addOk;
+  $("add").textContent = { Dokumente: "＋ Dokument", Benutzer: "＋ Benutzer", Mitglieder: "＋ Mitglied", Downloads: "＋ Datei hochladen", Rechnungen: "＋ Rechnung erstellen", Kasse: "＋ Buchung", "Mein Team": "＋ Team-Konto", Chat: "＋ Raum" }[name] || "＋ Eintrag";
   renderNav();
-  if (!section) isTrainer() ? renderTrainerHome() : renderHome();
-  else if (isTrainer() && name === "Mannschaften") renderTrainerTeam();
+  if (name !== "Chat") chatOpen = null;
+  if (!section) readable().length ? renderHome() : renderTrainerHome();
+  else if (name === "Meine Mannschaft") renderTrainerTeam();
+  else if (name === "Chat") renderChat();
+  else if (name === "Mein Team") renderTeam();
   else if (name === "Mitglieder") renderMembers();
   else if (name === "Kasse") renderKasse();
   else if (name === "Downloads") renderDownloads();
@@ -269,21 +303,24 @@ function renderHome() {
   let extra = pending.length ? `<section class="card warnbox"><h2>Deine Rückmeldung fehlt (${pending.length})</h2>
     ${pending.map(r => `<div class="rsvprow"><div><b>${esc(r.titel)}</b><small>${esc([dateText(r.datum) + (r.uhrzeit ? " · " + r.uhrzeit + " Uhr" : ""), r.ort].filter(Boolean).join(" · ") || r.bereich)}</small></div>
       <div class="rsvpbtns">${rsvpButtons(r)}</div></div>`).join("")}</section>` : "";
-  if (isVorstand()) {
+  const link = name => IDX(name) > 0 ? route(IDX(name)) : cal;
+  extra += chatHomeCard();
+  if (lv("Gründungsplan") >= 1) {
     const plan = entries.filter(r => r.bereich === "Gründungsplan"), done = plan.filter(r => ["Erledigt","Bestätigt"].includes(r.status)).length;
     const pct = plan.length ? Math.round(done / plan.length * 100) : 0;
-    extra += `<section class="card"><div class="cardtop"><h2>Gründungsfortschritt</h2><a class="link" href="${route(IDX("Gründungsplan"))}">Gründungsplan</a></div>
+    extra += `<section class="card"><div class="cardtop"><h2>Gründungsfortschritt</h2><a class="link" href="${link("Gründungsplan")}">Gründungsplan</a></div>
         <div class="progress" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"><span style="width:${pct}%"></span></div>
-        <p class="muted">${done} von ${plan.length} Schritten erledigt (${pct} %)</p></section>
-      <section class="card"><div class="cardtop"><h2>Unterlagen</h2><a class="link" href="${route(IDX("Dokumente"))}">Dokumente</a></div>
-        <p class="muted" style="margin-top:8px">${docs.length} Dokumente erfasst, ${docs.filter(d => d.groesse).length} mit hinterlegter Datei.</p></section>`;
+        <p class="muted">${done} von ${plan.length} Schritten erledigt (${pct} %)</p></section>`;
   }
+  if (lv("Dokumente") >= 1) extra += `<section class="card"><div class="cardtop"><h2>Unterlagen</h2><a class="link" href="${link("Dokumente")}">Dokumente</a></div>
+        <p class="muted" style="margin-top:8px">${docs.length} Dokumente erfasst, ${docs.filter(d => d.groesse).length} mit hinterlegter Datei.</p></section>`;
+  if (isTrainer()) extra += myTeamCard();
   $("view").innerHTML = `
     <div class="stats">
-      ${stat(by("Offen").length, "Offen", isVorstand() ? route(IDX("Offene Entscheidungen")) : cal)}
+      ${stat(by("Offen").length, "Offen", IDX("Offene Entscheidungen") > 0 ? link("Offene Entscheidungen") : cal)}
       ${stat(by("Geplant").length, "Geplant", cal)}
-      ${stat(by("Bestätigt").length, "Bestätigt", isVorstand() ? route(IDX("Satzung & Beschlüsse")) : cal)}
-      ${stat(by("Schätzung").length, "Schätzungen", route(IDX("Beiträge & Ehrenamt")))}
+      ${stat(by("Bestätigt").length, "Bestätigt", IDX("Satzung & Beschlüsse") > 0 ? link("Satzung & Beschlüsse") : cal)}
+      ${stat(by("Schätzung").length, "Schätzungen", link("Beiträge & Ehrenamt"))}
     </div>
     <div class="homegrid">${extra}
       <section class="card"><div class="cardtop"><h2>Nächste Termine</h2><a class="link" href="${cal}">Kalender</a></div>${mini(upcoming, "Keine anstehenden Termine.")}</section>
@@ -292,27 +329,35 @@ function renderHome() {
     </div>`;
 }
 
+// Startseite für Konten ohne eigene Bereiche (Trainer, Helfer, Festwirt-Team ohne Matrix-Rechte)
 function renderTrainerHome() {
   const t = today();
   const pending = entries.filter(r => r.rueckmeldung && !myAnswer(r) && (!r.datum || r.datum >= t) && r.status !== "Erledigt")
     .sort((a,b) => (a.datum || "9999").localeCompare(b.datum || "9999"));
   const upcoming = entries.filter(r => r.datum >= t && r.status !== "Erledigt").sort((a,b) => (a.datum+a.uhrzeit).localeCompare(b.datum+b.uhrzeit)).slice(0, 8);
-  const my = teams.map(tm => `<div class="rsvprow"><div><b>${esc(tm.name)}</b><small>${members.filter(m => m.mannschaft_id === tm.id).length} Mitglieder · ${new Set(parents.filter(p => p.mannschaft_id === tm.id).map(p => p.email)).size} Eltern-Adressen</small></div>
-    <a class="link" href="${route(IDX("Mannschaften"))}">ansehen</a></div>`).join("");
   $("view").innerHTML = `<div class="homegrid">
     ${pending.length ? `<section class="card warnbox"><h2>Deine Rückmeldung fehlt (${pending.length})</h2>
       ${pending.map(r => `<div class="rsvprow"><div><b>${esc(r.titel)}</b><small>${esc([dateText(r.datum) + (r.uhrzeit ? " · " + r.uhrzeit + " Uhr" : ""), r.ort].filter(Boolean).join(" · "))}</small></div>
         <div class="rsvpbtns">${rsvpButtons(r)}</div></div>`).join("")}</section>` : ""}
-    <section class="card"><div class="cardtop"><h2>Nächste Termine</h2><a class="link" href="${route(IDX("Kalender"))}">Kalender</a></div>${mini(upcoming, "Keine anstehenden Termine.")}</section>
-    <section class="card"><h2>Meine Mannschaft${teams.length > 1 ? "en" : ""}</h2>${my || '<p class="muted">Dir ist noch keine Mannschaft zugeordnet. Bitte beim Admin melden.</p>'}</section>
+    ${IDX("Kalender") > 0 ? `<section class="card"><div class="cardtop"><h2>Nächste Termine</h2><a class="link" href="${route(IDX("Kalender"))}">Kalender</a></div>${mini(upcoming, "Keine anstehenden Termine.")}</section>` : ""}
+    ${isTrainer() ? myTeamCard() : ""}
+    ${chatHomeCard(true)}
   </div>`;
 }
+const myTeams = () => teams.filter(t => (me.mannschaften || []).includes(t.id));
+function myTeamCard() {
+  const my = myTeams().map(tm => `<div class="rsvprow"><div><b>${esc(tm.name)}</b><small>${members.filter(m => m.mannschaft_id === tm.id).length} Mitglieder · ${new Set(parents.filter(p => p.mannschaft_id === tm.id).map(p => p.email)).size} Eltern-Adressen</small></div>
+    <div class="rsvpbtns">${tm.whatsapp_link ? waButton(tm) : ""}<a class="btnlink quiet" href="${route(IDX("Meine Mannschaft"))}">ansehen</a></div></div>`).join("");
+  return `<section class="card"><h2>Meine Mannschaft${myTeams().length > 1 ? "en" : ""}</h2>${my || '<p class="muted">Dir ist noch keine Mannschaft zugeordnet. Bitte beim Admin melden.</p>'}</section>`;
+}
+// WhatsApp-Gruppe der Mannschaft öffnen (Einladungslink, kein WhatsApp-Business nötig)
+const waButton = tm => `<a class="btnlink wa" target="_blank" rel="noopener noreferrer" href="${esc(tm.whatsapp_link)}">💬 WhatsApp-Gruppe ${esc(tm.name)}</a>`;
 function renderTrainerTeam() {
-  $("view").innerHTML = `<div class="sectionhead"><h2>Meine Mannschaft${teams.length > 1 ? "en" : ""}</h2></div>` + (teams.map(tm => {
+  $("view").innerHTML = `<div class="sectionhead"><h2>Meine Mannschaft${myTeams().length > 1 ? "en" : ""}</h2></div>` + (myTeams().map(tm => {
     const list = members.filter(m => m.mannschaft_id === tm.id);
-    return `<h3 class="teamhead">${esc(tm.name)} <span class="muted small">${list.length} Mitglieder · ${list.filter(m => m.status === "Aktiv").length} aktiv</span></h3>
+    return `<div class="sectionhead teamhead"><h3 style="margin:0">${esc(tm.name)} <span class="muted small">${list.length} Mitglieder · ${list.filter(m => m.status === "Aktiv").length} aktiv</span></h3>${tm.whatsapp_link ? waButton(tm) : ""}</div>
       <div class="tablewrap"><table class="table"><thead><tr><th>Vorname</th><th>Nachname</th><th>Alter</th><th>Status</th></tr></thead><tbody>
-      ${list.map(m => `<tr><td>${esc(m.vorname)}</td><td>${esc(m.nachname)}</td><td>${m.alter ?? ""}</td><td>${m.status === "Aktiv" ? "aktiv" : `<span class="lock">${esc(m.status.toLowerCase())}</span>`}</td></tr>`).join("")
+      ${list.map(m => `<tr><td>${esc(m.vorname)}</td><td>${esc(m.nachname)}</td><td>${m.alter ?? age(m.geburtsdatum)}</td><td>${m.status === "Aktiv" ? "aktiv" : `<span class="lock">${esc(m.status.toLowerCase())}</span>`}</td></tr>`).join("")
         || '<tr><td colspan="4" class="muted">Noch keine Mitglieder in dieser Mannschaft.</td></tr>'}</tbody></table></div>`;
   }).join("") || '<p class="muted">Dir ist noch keine Mannschaft zugeordnet. Bitte beim Admin melden.</p>');
 }
@@ -356,7 +401,7 @@ function renderCalendar() {
   for (let i = 0; i < 42; i++) {
     const d = new Date(start.getTime() + i * 864e5), iso = d.toISOString().slice(0,10);
     const ev = (byDay[iso] || []).sort((a,b) => a.uhrzeit.localeCompare(b.uhrzeit)).map(r => {
-      const lock = isVorstand() && vorstandOnly(r.bereich), tr = r.fuer_trainer && !isTrainer();
+      const lock = vorstandOnly(r.bereich), tr = r.fuer_trainer && canW(r.bereich);
       return `<button class="ev" data-s="${esc(r.status)}" data-edit="${esc(r.id)}" title="${esc(r.titel)}${lock ? " (nur Vorstand sichtbar)" : ""}${tr ? " (auch für Trainer)" : ""}">${lock ? "🔒 " : ""}${tr ? "🏃 " : ""}${r.uhrzeit ? esc(r.uhrzeit)+" " : ""}${esc(r.titel)}</button>`;
     }).join("");
     cells += `<div class="day${d.getUTCMonth() !== m-1 ? " other" : ""}${iso === t ? " today" : ""}" data-day="${iso}"><span class="num">${d.getUTCDate()}</span>${ev}</div>`;
@@ -388,10 +433,11 @@ function teamOptions(selId, legacyText) {
     + (!selId && legacyText ? `<option value="__alt" selected>„${esc(legacyText)}“ (nicht zugeordnet)</option>` : "");
 }
 function teamsCard() {
-  if (!isVorstand()) return "";
+  if (!D().mannschaften_pflegen) return "";
   return `<details class="card" style="margin-bottom:14px"${teams.length && !teamsUnassigned.length ? "" : " open"}><summary><b>Mannschaftsliste</b> <span class="muted small">${teams.filter(t => t.aktiv).length} aktiv${teamsUnassigned.length ? ` · ⚠ ${teamsUnassigned.length} Werte nicht zugeordnet` : ""}</span></summary>
-    <div class="tablewrap" style="margin-top:10px"><table class="table"><thead><tr><th>Mannschaft</th><th>Sortierung</th><th>Mitglieder</th><th>Eltern</th><th>Status</th><th></th></tr></thead><tbody>
+    <div class="tablewrap" style="margin-top:10px"><table class="table"><thead><tr><th>Mannschaft</th><th>Sortierung</th><th>Mitglieder</th><th>Eltern</th><th>WhatsApp-Gruppe</th><th>Status</th><th></th></tr></thead><tbody>
       ${teams.map(t => `<tr><td><b>${esc(t.name)}</b></td><td>${t.sortierung}</td><td>${members.filter(m => m.mannschaft_id === t.id).length}</td><td>${parents.filter(p => p.mannschaft_id === t.id).length}</td>
+        <td>${t.whatsapp_link ? "✓ Link hinterlegt" : '<span class="lock">–</span>'}</td>
         <td>${t.aktiv ? "aktiv" : '<span class="lock">inaktiv</span>'}</td><td><button class="quiet" data-teamedit="${esc(t.id)}">Ändern</button></td></tr>`).join("") || '<tr><td colspan="6" class="muted">Noch keine Mannschaften.</td></tr>'}
     </tbody></table></div>
     <div class="actions"><button class="quiet" data-act="addTeam">＋ Mannschaft</button></div>
@@ -409,8 +455,10 @@ function editTeam(id) {
   const t = teams.find(x => x.id === id);
   const name = prompt(t ? "Name der Mannschaft:" : "Name der neuen Mannschaft (z. B. U11):", t?.name || ""); if (name === null || !name.trim()) return;
   const sort = prompt("Sortierung (kleine Zahl = weiter oben):", String(t?.sortierung ?? teams.length + 1)); if (sort === null) return;
+  const wa = prompt("WhatsApp-Gruppenlink (optional).\nIn WhatsApp: Gruppe → Gruppeninfo → „Per Link einladen“ → Link kopieren.\nBeispiel: https://chat.whatsapp.com/AbCdEf123…\nLeer lassen = kein Link.", t?.whatsapp_link || "");
+  if (wa === null) return;
   const aktiv = t ? confirm(`Soll „${name.trim()}“ aktiv sein?\n\nOK = aktiv · Abbrechen = inaktiv (bleibt erhalten, ist aber nicht mehr auswählbar)`) : true;
-  teamApi(t ? "/api/mannschaften/" + t.id : "/api/mannschaften", t ? "PUT" : "POST", { name: name.trim(), sortierung: Number(sort) || 0, aktiv }, "Mannschaftsliste gespeichert.");
+  teamApi(t ? "/api/mannschaften/" + t.id : "/api/mannschaften", t ? "PUT" : "POST", { name: name.trim(), sortierung: Number(sort) || 0, aktiv, whatsapp_link: wa.trim() }, "Mannschaftsliste gespeichert.");
 }
 
 function renderMembers() {
@@ -457,28 +505,36 @@ function exportMembersCsv() {
 
 /* ---------------- Eltern-Verteiler ---------------- */
 function parentsPanel() {
-  const ro = isTrainer();
+  // WhatsApp-Gruppen der Mannschaften (kostenlos über Einladungslink) – für alle, die Elternkommunikation sehen
+  const wa = teams.filter(t => t.aktiv && t.whatsapp_link);
+  const waCard = wa.length ? `<section class="card parentsbox"><h3>WhatsApp-Gruppen der Mannschaften</h3>
+    <p class="muted small" style="margin:4px 0 8px">Öffnet die Gruppe in WhatsApp. Eine Nachricht unten mit „Per WhatsApp teilen“ an die Gruppe weiterleiten.</p>
+    <div class="actions">${wa.map(waButton).join("")}</div></section>` : "";
+  if (!D().eltern_alle && !D().eltern_team) return waCard;
+  const ro = !D().eltern_alle, ok = parents.filter(p => p.einwilligung).length;
   const rows = parents.map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.kind)}</td><td>${ro ? esc(teamName(p.mannschaft_id) || p.mannschaft) : teamCell(p)}</td><td class="wrap">${esc(p.email)}</td>
+    <td>${p.einwilligung ? `✓ ${esc(dateText(p.einwilligung_datum))}` : '<span class="unassigned">⚠ fehlt</span>'}</td>
     <td>${ro ? "" : `<button class="quiet" data-parentedit="${esc(p.id)}">Bearbeiten</button>`}</td></tr>`).join("");
-  return `<section class="card parentsbox"><div class="cardtop"><h3>Eltern-Verteiler${ro ? " meiner Mannschaft" + (teams.length > 1 ? "en" : "") : ""} <span class="muted small">${parents.length} ${parents.length === 1 ? "Adresse" : "Adressen"}</span></h3>
+  return waCard + `<section class="card parentsbox"><div class="cardtop"><h3>Eltern-Verteiler${ro ? " meiner Mannschaft" + (myTeams().length > 1 ? "en" : "") : ""} <span class="muted small">${parents.length} ${parents.length === 1 ? "Adresse" : "Adressen"}${ro ? "" : ` · ${ok} mit Einwilligung`}</span></h3>
       <div class="actions" style="margin:0">${ro ? "" : `<button class="quiet" data-act="addParent">＋ Eltern</button>
       <button class="quiet" data-act="importPeople" data-kind="eltern">CSV/Excel-Datei hochladen</button>`}
-      ${parents.length ? '<button class="quiet" data-act="mailAll">✉ E-Mail an Eltern</button>' : ""}</div></div>
+      ${ok ? '<button class="quiet" data-act="mailAll">✉ E-Mail an Eltern</button>' : ""}</div></div>
+    <p class="muted small" style="margin-top:6px">E-Mails gehen nur an Eltern mit Einwilligung, immer im BCC. Sichtbar nur für Admins, Jugendleitung und Trainer der jeweiligen Mannschaft.</p>
     ${parents.length ? `<details${parents.length <= 8 ? " open" : ""}><summary>Liste anzeigen</summary><div class="tablewrap" style="margin-top:8px"><table class="table">
-      <thead><tr><th>Name</th><th>Kind</th><th>Mannschaft</th><th>E-Mail</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></details>`
-      : `<p class="muted small" style="margin-top:8px">${ro ? "Für deine Mannschaft sind noch keine Eltern-Adressen hinterlegt." : "Noch keine Eltern eingetragen. Füge Adressen einzeln hinzu oder lade eine CSV/Excel-Liste hoch."}</p>`}
+      <thead><tr><th>Name</th><th>Kind</th><th>Mannschaft</th><th>E-Mail</th><th>Einwilligung</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></details>`
+      : `<p class="muted small" style="margin-top:8px">${ro ? "Für deine Mannschaft sind noch keine Eltern-Adressen (mit Einwilligung) hinterlegt." : "Noch keine Eltern eingetragen. Am besten nur WhatsApp-Gruppenlinks nutzen – Adressen nur mit Einwilligung."}</p>`}
   </section>`;
 }
 
 function renderDocs() {
   $("view").innerHTML = `<div class="sectionhead"><h2>Dokumente</h2></div>
-    <p class="muted" style="margin-bottom:18px;max-width:78ch">Nur für den Vorstand sichtbar. Dateien werden in der Vereinsdatenbank gespeichert (max. 10 MB pro Datei).</p>
+    <p class="muted" style="margin-bottom:18px;max-width:78ch">Sichtbar für: ${esc([...(me.sichtbar?.Dokumente || []), "Admins"].join(", "))}. Dateien werden in der Vereinsdatenbank gespeichert (max. 10 MB pro Datei).</p>
     ${docs.map(d => `<article class="card"><div class="cardtop"><h3>${esc(d.titel)}</h3>${badge(d.status)}</div>
       <div class="meta">${esc([dateText(d.datum), d.groesse ? d.dateiname + " · " + fmtBytes(d.groesse) : "Noch keine Datei hinterlegt"].filter(Boolean).join(" · "))}</div>
       ${d.beschreibung ? `<p class="body">${esc(d.beschreibung)}</p>` : ""}
       <div class="actions">
         ${d.groesse ? `<button data-docopen="${esc(d.id)}">Öffnen</button><button class="quiet" data-docdl="${esc(d.id)}">Herunterladen</button>` : ""}
-        <button class="quiet" data-docedit="${esc(d.id)}">${d.groesse ? "Bearbeiten" : "Datei hochladen"}</button>
+        ${canW("Dokumente") ? `<button class="quiet" data-docedit="${esc(d.id)}">${d.groesse ? "Bearbeiten" : "Datei hochladen"}</button>` : ""}
       </div></article>`).join("") || '<p class="muted">Noch keine Dokumente.</p>'}`;
 }
 
@@ -491,32 +547,115 @@ async function renderLog() {
   } catch (e) { $("view").innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
 }
 
+/* ---------------- Benutzer (Admin): Konten · Funktionen · Rechte ---------------- */
+let uTab = "konten", matrix = null;
+const funcBadges = ids => (ids || []).map(id => funktionen.find(f => f.id === id)).filter(Boolean)
+  .map(f => `<span class="rolebadge fn${f.schluessel === "schatzmeister" ? " sch" : f.gruppe === "Fest" ? " fest" : f.gruppe === "Sport" ? " tr" : ""}${f.aktiv ? "" : " off"}">${esc(f.name)}</span>`).join(" ");
 function renderUsers() {
-  const roleBadge = u => `<span class="rolebadge${u.rolle === "ausschuss" ? " aus" : u.rolle === "trainer" ? " tr" : ""}">${ROLE[u.rolle]}</span>${u.ist_admin ? ' <span class="rolebadge adm">Admin</span>' : ""}`
-    + (u.rolle === "vorstand" ? ` <button class="rolebadge sch${u.ist_schatzmeister ? "" : " off"}" data-schatz="${esc(u.id)}" title="Klicken: Schatzmeister-Recht ${u.ist_schatzmeister ? "entziehen" : "geben"}">${u.ist_schatzmeister ? "Schatzmeister" : "+ Schatzmeister"}</button>` : "")
-    + (u.rolle === "trainer" ? `<div class="lock">${esc((u.mannschaften || []).map(teamName).filter(Boolean).join(", ") || "keine Mannschaft")}</div>` : "");
-  $("view").innerHTML = `<div class="sectionhead"><h2>Benutzer</h2><span class="muted small">${users.length} Konten</span></div>
-    <p class="muted" style="margin-bottom:14px;max-width:80ch"><b>Vorstand</b> sieht und bearbeitet alles. <b>Ausschuss</b> sieht und bearbeitet nur ${esc([...AUSSCHUSS_GROUPS, "Mitglieder"].join(", "))} und darf nichts löschen.
-      <b>Trainer</b> sieht nur Termine „Für Trainer sichtbar“, die Mitglieder (ohne Geburtsdatum, Telefon, Notiz) und Eltern seiner Mannschaft(en) – nur lesen.
-      Zusatzrechte für den Vorstand: <b>Admin</b> verwaltet die Benutzer, <b>Schatzmeister</b> schreibt in der Kasse.</p>
-    <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Benutzername</th><th>Rolle</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead><tbody>
-    ${users.map(u => `<tr><td><b>${esc(u.anzeigename)}</b></td><td>${esc(u.benutzername)}</td><td>${roleBadge(u)}</td><td class="lock">${esc(u.letzter_login ? fmtTime(u.letzter_login) : "noch nie")}</td>
+  const tabs = [["konten", `Konten (${users.length})`], ["funktionen", `Funktionen (${funktionen.length})`], ["rechte", "Rechte"]];
+  $("view").innerHTML = `<div class="sectionhead"><h2>Benutzer</h2><div class="tabs">${tabs.map(([k, l]) => `<button class="quiet${uTab === k ? " on" : ""}" data-utab="${k}">${l}</button>`).join("")}</div></div><div id="utab"></div>`;
+  $("add").hidden = uTab !== "konten";
+  if (uTab === "konten") renderUserList(); else if (uTab === "funktionen") renderFuncList(); else renderMatrix();
+}
+function renderUserList() {
+  const roleBadge = u => `<span class="rolebadge${u.rolle === "ausschuss" ? " aus" : u.rolle === "trainer" ? " tr" : u.rolle === "helfer" ? " hlf" : ""}">${ROLE[u.rolle]}</span>${u.ist_admin ? ' <span class="rolebadge adm">Admin</span>' : ""}`;
+  $("utab").innerHTML = `<p class="muted" style="margin-bottom:14px;max-width:85ch">Jedes Konto hat eine <b>Grundrolle</b> (Vorstand, Ausschuss, Trainer, Helfer) und beliebig viele <b>Funktionen</b>.
+      Was jemand sieht und darf, steht unter <b>Rechte</b>. Rechnungen und Kasse gibt es nur für Admins und Schatzmeister/in.</p>
+    <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Grundrolle</th><th>Funktionen</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead><tbody>
+    ${users.map(u => `<tr><td><b>${esc(u.anzeigename)}</b><div class="lock">${esc(u.benutzername)}</div></td><td>${roleBadge(u)}</td>
+      <td>${funcBadges(u.funktionen) || '<span class="lock">–</span>'}${(u.mannschaften || []).length ? `<div class="lock">Mannschaften: ${esc(u.mannschaften.map(teamName).filter(Boolean).join(", "))}</div>` : ""}</td>
+      <td class="lock">${esc(u.letzter_login ? fmtTime(u.letzter_login) : "noch nie")}</td>
       <td>${u.aktiv ? (u.pw_aendern ? '<span class="lock">wartet auf 1. Login</span>' : "aktiv") : '<span class="lock">deaktiviert</span>'}</td>
       <td><button class="quiet" data-useredit="${esc(u.id)}">Bearbeiten</button></td></tr>`).join("")}
     </tbody></table></div>`;
 }
+function renderFuncList() {
+  const groups = ["Vorstand", "Ausschuss", "Sport", "Fest", "Sonstige"];
+  const count = id => users.filter(u => (u.funktionen || []).includes(id)).length;
+  $("utab").innerHTML = `<p class="muted" style="margin-bottom:12px;max-width:85ch">Funktionen kann man umbenennen und deaktivieren (deaktiviert = gibt keine Rechte mehr, bleibt aber erhalten).
+      Sonderfunktionen (🔑) haben feste Regeln, z. B. Schatzmeister/in für Rechnungen und Kasse – das gilt auch nach dem Umbenennen.</p>
+    <div class="actions" style="margin-bottom:12px"><button data-act="addFunc">＋ Funktion</button></div>
+    ${groups.map(g => { const list = funktionen.filter(f => f.gruppe === g); return list.length ? `<h3 class="teamhead">${g}</h3><div class="tablewrap"><table class="table"><tbody>
+      ${list.map(f => `<tr><td><b>${esc(f.name)}</b>${f.schluessel ? ' <span title="Sonderfunktion mit festen Regeln">🔑</span>' : ""}</td><td class="lock">${count(f.id)} Konten</td>
+        <td>${f.aktiv ? "aktiv" : '<span class="lock">deaktiviert</span>'}</td>
+        <td style="white-space:nowrap"><button class="quiet" data-funcren="${esc(f.id)}">Umbenennen</button> <button class="quiet" data-functog="${esc(f.id)}">${f.aktiv ? "Deaktivieren" : "Aktivieren"}</button></td></tr>`).join("")}
+      </tbody></table></div>` : ""; }).join("")}`;
+}
+async function renderMatrix() {
+  $("utab").innerHTML = '<p class="muted">Lädt …</p>';
+  try { matrix = await api("/api/rechte"); } catch (e) { $("utab").innerHTML = `<p class="muted">${esc(e.message)}</p>`; return; }
+  const M = matrix, short = a => ({ "Satzung & Beschlüsse": "Satzung", "Vorstand & Ausschuss": "Vorstand", "Beiträge & Ehrenamt": "Beiträge", "Elternkommunikation": "Eltern­komm.", "Offene Entscheidungen": "Entschei­dungen", "Änderungsprotokoll": "Protokoll", "Festwirtschaft": "Fest­wirtschaft" }[a] || a);
+  let lastGroup = "";
+  $("utab").innerHTML = `<div class="card" style="margin-bottom:12px"><b>Feste Regeln</b> (nicht änderbar):
+      <ul class="rules"><li>Rechnungen und Kasse: nur Admins und Schatzmeister/in. <label class="check" style="display:inline-flex;margin:0"><input type="checkbox" data-act="kpToggle"${M.kassenpruefer_lesen ? " checked" : ""}> Kassenprüfer/in darf lesen</label></li>
+      <li>Benutzer, Funktionen und Rechte: nur Admins. Admins haben überall alle Rechte (Chat-Nachrichten aber nur als Raum-Mitglied).</li>
+      <li>Trainer, Co-Trainer, Betreuer, Festwirt-Team und Helfer bekommen keine Vorstandsbereiche (graue Felder).</li>
+      <li>Eltern-Kontakte: nur Admins, Jugendleitung und Trainer der jeweiligen Mannschaft.</li></ul>
+      <p class="muted small">Stufen: – keine (unsichtbar) · L lesen · B bearbeiten · X löschen. Wer mehrere Funktionen hat, bekommt die höchste Stufe. Änderungen wirken sofort.</p></div>
+    <div class="tablewrap matrix"><table class="table"><thead><tr><th>Rolle / Funktion</th>${M.bereiche.map(a => `<th title="${esc(a)}">${short(a)}</th>`).join("")}</tr></thead><tbody>
+    ${M.subjekte.map(s => {
+      const head = s.gruppe !== lastGroup ? `<tr class="mgroup"><td colspan="${M.bereiche.length + 1}">${esc(lastGroup = s.gruppe)}</td></tr>` : "";
+      return head + `<tr${s.aktiv ? "" : ' class="off"'}><td><b>${esc(s.label)}</b>${s.aktiv ? "" : ' <span class="lock">(deaktiviert)</span>'}</td>${M.bereiche.map(a => {
+        const v = M.werte[s.key]?.[a] || 0, locked = s.gesperrt && M.vorstand_bereiche.includes(a);
+        return `<td><select class="mcell s${v}" data-msubj="${esc(s.key)}" data-marea="${esc(a)}"${locked ? ' disabled title="Feste Regel: kein Vorstandsbereich"' : ""} aria-label="${esc(s.label)} – ${esc(a)}">${["–", "L", "B", "X"].map((l, i) => `<option value="${i}"${i === v ? " selected" : ""}>${l}</option>`).join("")}</select></td>`;
+      }).join("")}</tr>`;
+    }).join("")}</tbody></table></div>`;
+}
+async function setMatrix(sel) {
+  sel.disabled = true;
+  try { matrix = await api("/api/rechte", { method: "PUT", data: { subjekt: sel.dataset.msubj, bereich: sel.dataset.marea, stufe: Number(sel.value) } });
+    sel.className = "mcell s" + sel.value; notice("Recht gespeichert.", true); me = (await api("/api/ich")).benutzer; }
+  catch (e) { notice(e.message); renderMatrix(); }
+  finally { sel.disabled = false; }
+}
+
+/* ---------------- Mein Team (Festwirt/in): nur Festwirt-Team-Konten ---------------- */
+function renderTeam() {
+  $("view").innerHTML = `<div class="sectionhead"><h2>Mein Festwirt-Team</h2><span class="muted small">${teamUsers.length} Konten</span></div>
+    <p class="muted" style="margin-bottom:12px;max-width:80ch">Du kannst Konten für dein Festwirt-Team anlegen, deaktivieren und Passwörter zurücksetzen.
+      Diese Konten haben nur die Funktion <b>Festwirt-Team</b> und sehen nur die Festwirtschaft, ihre Termine und eure Chat-Räume.</p>
+    <div class="tablewrap"><table class="table"><thead><tr><th>Name</th><th>Benutzername</th><th>Letzter Login</th><th>Status</th><th></th></tr></thead><tbody>
+    ${teamUsers.map(u => `<tr><td><b>${esc(u.anzeigename)}</b></td><td>${esc(u.benutzername)}</td><td class="lock">${esc(u.letzter_login ? fmtTime(u.letzter_login) : "noch nie")}</td>
+      <td>${u.aktiv ? (u.pw_aendern ? '<span class="lock">wartet auf 1. Login</span>' : "aktiv") : '<span class="lock">deaktiviert</span>'}</td>
+      <td style="white-space:nowrap"><button class="quiet" data-teamtog="${esc(u.id)}">${u.aktiv ? "Deaktivieren" : "Aktivieren"}</button> <button class="quiet" data-teampw="${esc(u.id)}">Passwort zurücksetzen</button></td></tr>`).join("")
+      || '<tr><td colspan="5" class="muted">Noch keine Team-Konten. Oben auf „＋ Team-Konto“ klicken.</td></tr>'}
+    </tbody></table></div>`;
+}
+async function newTeamAccount() {
+  const anzeige = prompt("Name des Helfers (z. B. Anna Beispiel):"); if (!anzeige?.trim()) return;
+  const name = prompt("Benutzername zum Anmelden (3–40 Zeichen, a–z, 0–9, Punkt, Minus):", anzeige.trim().toLowerCase().replace(/\s+/g, ".").replace(/[^a-z0-9._-]/g, "")); if (!name?.trim()) return;
+  const pw = genPassword(), user = name.trim().toLowerCase();
+  try {
+    teamUsers = (await api("/api/team", { method: "POST", data: { benutzername: user, anzeigename: anzeige.trim(), passwort: await clientHash(user, pw) } })).benutzer;
+    alert(`Team-Konto angelegt.\n\nBenutzername: ${user}\nStartpasswort: ${pw}\n\nBitte persönlich oder per Telefon weitergeben. Beim ersten Login muss ein eigenes Passwort gesetzt werden.`);
+    render(); notice("Team-Konto angelegt.", true);
+  } catch (e) { notice(e.message); }
+}
+async function teamToggle(id) {
+  const u = teamUsers.find(x => x.id === id); if (!u || !confirm(`${u.anzeigename} ${u.aktiv ? "deaktivieren" : "wieder aktivieren"}?`)) return;
+  try { teamUsers = (await api("/api/team/" + id, { method: "PUT", data: { aktiv: !u.aktiv } })).benutzer; render(); notice("Gespeichert.", true); } catch (e) { notice(e.message); }
+}
+async function teamPassword(id) {
+  const u = teamUsers.find(x => x.id === id); if (!u || !confirm(`Passwort von ${u.anzeigename} zurücksetzen?`)) return;
+  const pw = genPassword();
+  try { await api(`/api/team/${id}/passwort`, { method: "POST", data: { passwort: await clientHash(u.benutzername, pw) } });
+    alert(`Neues Startpasswort für ${u.benutzername}:\n\n${pw}\n\nBeim nächsten Login muss ein eigenes Passwort gesetzt werden.`); } catch (e) { notice(e.message); }
+}
 
 function renderAccount() {
+  const areas = Object.entries(me.rechte || {}).filter(([, v]) => v > 0).map(([a, v]) => `${a} (${["", "lesen", "bearbeiten", "löschen"][v]})`);
   $("view").innerHTML = `<div class="sectionhead"><h2>Mein Konto</h2></div>
     <div class="optgrid">
       <section class="card"><h2>${esc(me.anzeigename)}</h2>
         <dl class="kv"><dt>Benutzername</dt><dd>${esc(me.benutzername)}</dd><dt>Rolle</dt><dd>${esc(rightsLabel(me))}</dd>
-        <dt>${isTrainer() ? "Mannschaften" : "Bereiche"}</dt><dd>${esc(isTrainer() ? teams.map(t => t.name).join(", ") || "keine" : me.bereiche.join(", "))}</dd><dt>Angemeldet</dt><dd>${store() === localStorage ? "dauerhaft auf diesem Gerät" : `bis zum Schließen des Browsers (Abmeldung nach ${IDLE_MINUTES} Min. Inaktivität)`}</dd></dl>
+        ${myTeams().length ? `<dt>Mannschaften</dt><dd>${esc(myTeams().map(t => t.name).join(", "))}</dd>` : ""}
+        <dt>Bereiche</dt><dd>${esc(areas.join(", ") || "keine eigenen Bereiche")}${D().geld_lesen ? esc(", Rechnungen und Kasse" + (D().geld_schreiben ? "" : " (lesen)")) : ""}</dd>
+        <dt>Angemeldet</dt><dd>${store() === localStorage ? "dauerhaft auf diesem Gerät" : `bis zum Schließen des Browsers (Abmeldung nach ${IDLE_MINUTES} Min. Inaktivität)`}</dd></dl>
         <div class="actions"><button class="quiet" data-act="changepw">Passwort ändern</button><button class="quiet" data-act="logout">Abmelden</button></div></section>
       <section class="card"><h2>Export</h2>
-        <p>Termine für den Handy-Kalender${isVorstand() ? ", Einträge als Excel-Tabelle und eine komplette Sicherung als JSON" : isTrainer() ? "" : " und Einträge als Excel-Tabelle"}.</p>
-        <div class="actions"><button class="quiet" data-act="ics">Termine (.ics)</button>${isTrainer() ? "" : '<button class="quiet" data-act="csv">Einträge (CSV)</button>'}
-        ${isVorstand() ? '<button class="quiet" data-act="exportJson">Sicherung (JSON)</button><button class="quiet" data-act="importJson">JSON importieren</button>' : ""}</div></section>
+        <p>Termine für den Handy-Kalender${readable().length ? " und Einträge als Excel-Tabelle" : ""}${D().export ? ", dazu eine komplette Sicherung als JSON" : ""}.</p>
+        <div class="actions"><button class="quiet" data-act="ics">Termine (.ics)</button>${readable().length ? '<button class="quiet" data-act="csv">Einträge (CSV)</button>' : ""}
+        ${D().export ? '<button class="quiet" data-act="exportJson">Sicherung (JSON)</button><button class="quiet" data-act="importJson">JSON importieren</button>' : ""}</div></section>
     </div>`;
 }
 
@@ -555,7 +694,7 @@ async function importJsonFile(file) {
   if (!Array.isArray(list)) return notice("Keine Einträge in der Datei gefunden.");
   const arr = k => Array.isArray(data[k]) ? data[k] : [];
   const extra = [["mitglieder", "Mitglieder"], ["eltern", "Eltern-Adressen"], ["mannschaften", "Mannschaften"]].filter(([k]) => arr(k).length);
-  const restore = [["rechnungen", "Rechnungen", invoices.length], ...(isSchatz() ? [["kassenbuchungen", "Kassenbuchungen", kasse.buchungen.length]] : [])].filter(([k]) => arr(k).length);
+  const restore = isSchatz() ? [["rechnungen", "Rechnungen", invoices.length], ["kassenbuchungen", "Kassenbuchungen", kasse.buchungen.length]].filter(([k]) => arr(k).length) : [];
   if (!confirm(`${list.length} Einträge als neue Einträge importieren?${extra.map(([k, l]) => `\nDazu ${arr(k).length} ${l} (Doppelte werden übersprungen).`).join("")}`
     + restore.map(([k, l, have]) => `\n${arr(k).length} ${l}: ${have ? "werden übersprungen (feste Nummern, die Liste ist nicht leer)" : "werden wiederhergestellt (mit ihren Nummern)"}.`).join("")
     + (arr("downloads").length || arr("anhaenge").length ? "\nDateien (Downloads, Anhänge, Belege) sind nicht in der Sicherung und werden nicht übernommen." : "")
@@ -564,7 +703,7 @@ async function importJsonFile(file) {
   // 1. Mannschaften zuerst, damit Einträge/Mitglieder/Eltern zugeordnet werden können (alte ID → neue ID über den Namen)
   const oldTeams = {};
   for (const t of arr("mannschaften")) oldTeams[t.id] = t.name;
-  if (arr("mannschaften").length && isVorstand())
+  if (arr("mannschaften").length && D().mannschaften_pflegen)
     try { const r = await api("/api/mannschaften/import", { method: "POST", data: { liste: arr("mannschaften").map(t => ({ name: t.name, sortierung: t.sortierung, aktiv: !!t.aktiv })) } }); teams = r.mannschaften; msgs.push(`${r.neu} Mannschaften`); } catch (e) { msgs.push(e.message); }
   const mapTeam = id => findTeam(oldTeams[id])?.id || "";
   for (const k of ["mitglieder", "eltern"]) {
@@ -826,7 +965,7 @@ $("peopleFile").onchange = async e => {
       <ul><li>Erkannte Spalten: ${res.info || "keine"}</li>
       ${res.extra.length ? `<li>Weitere Spalten kommen in die Notiz: ${res.extra.map(h => `„${esc(h)}“`).join(", ")}</li>` : ""}
       ${res.skipped.length ? `<li>Übersprungen: ${res.skipped.length} Zeilen (${esc(res.skipped.slice(0, 4).join("; "))}${res.skipped.length > 4 ? " …" : ""})</li>` : ""}
-      ${res.unknownTeams.length ? `<li class="unassigned">⚠ Unbekannte Mannschaft${res.unknownTeams.length > 1 ? "en" : ""}: ${res.unknownTeams.map(x => `„${esc(x)}“`).join(", ")} – werden übernommen, aber als „nicht zugeordnet“ markiert. ${isVorstand() ? "Du kannst sie danach in der Mannschaftsliste zuordnen." : "Der Vorstand kann sie in der Mannschaftsliste zuordnen."}</li>` : ""}
+      ${res.unknownTeams.length ? `<li class="unassigned">⚠ Unbekannte Mannschaft${res.unknownTeams.length > 1 ? "en" : ""}: ${res.unknownTeams.map(x => `„${esc(x)}“`).join(", ")} – werden übernommen, aber als „nicht zugeordnet“ markiert. ${D().mannschaften_pflegen ? "Du kannst sie danach in der Mannschaftsliste zuordnen." : "Sie können später in der Mannschaftsliste zugeordnet werden."}</li>` : ""}
       <li>Wer schon in der Liste steht, wird nicht doppelt angelegt.</li></ul>
       ${res.list.length ? `<div class="tablewrap"><table class="table"><thead><tr>${res.cols.map(c => `<th>${c[0]}</th>`).join("")}</tr></thead><tbody>
         ${res.list.slice(0, 8).map(x => `<tr>${res.cols.map(c => `<td>${esc(c[1](x))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
@@ -856,13 +995,13 @@ $("importForm").onsubmit = async e => {
 const form = $("form"), editor = $("editor"), field = n => form.elements.namedItem(n);
 const FIELDS = ["titel","bereich","status","datum","uhrzeit","ort","zustaendig","inhalt","quelle"];
 function edit(rec, preset = {}) {
-  if (isTrainer() && !rec) return;   // Trainer legt keine Einträge an
-  const ro = isTrainer();            // Trainer: nur ansehen
+  if (!rec && !writable().length) return;   // keine Schreibrechte → nichts anlegen
+  const ro = !!rec && !canW(rec.bereich);     // nur lesen: ansehen
   activeId = rec?.id || null;
-  $("formTitle").textContent = ro ? "Termin" : activeId ? "Eintrag bearbeiten" : "Eintrag anlegen";
-  $("remove").hidden = ro || !activeId || !me.darf_loeschen; $("duplicate").hidden = ro || !activeId; $("save").hidden = ro;
+  $("formTitle").textContent = ro ? "Eintrag" : activeId ? "Eintrag bearbeiten" : "Eintrag anlegen";
+  $("remove").hidden = ro || !activeId || !canD(rec.bereich); $("duplicate").hidden = ro || !activeId; $("save").hidden = ro;
   $("error").textContent = "";
-  const cur = sections[section], allowed = ro ? [rec.bereich] : me.bereiche;
+  const cur = sections[section], allowed = ro ? [rec.bereich] : writable();
   field("bereich").innerHTML = options(allowed, rec?.bereich || preset.bereich || (allowed.includes(cur) ? cur : allowed[0]));
   field("status").innerHTML = options(STATUSES, rec?.status || preset.status || (cur === "Kalender" ? "Geplant" : "Offen"));
   for (const k of ["titel","datum","uhrzeit","ort","zustaendig","inhalt","quelle"]) field(k).value = rec?.[k] ?? preset[k] ?? "";
@@ -871,7 +1010,6 @@ function edit(rec, preset = {}) {
   const tid = (rec ? rec.mannschaft_id : preset.mannschaft_id) || "";
   field("mannschaft_id").innerHTML = `<option value="">Alle Trainer</option>` + teams.filter(t => t.aktiv || t.id === tid).map(t => `<option value="${esc(t.id)}"${t.id === tid ? " selected" : ""}>Nur Trainer von ${esc(t.name)}</option>`).join("");
   for (const el of form.elements) if (el.name && el.type !== "button") el.disabled = ro;
-  $("trainerWrap").hidden = ro;
   updateVisHint();
   $("formMeta").textContent = rec ? `Zuletzt geändert ${fmtTime(rec.geaendert)} von ${rec.geaendert_von}` : "";
   field("datei").value = ""; pendingSheet = null; $("importBox").hidden = true; $("importBox").innerHTML = "";
@@ -880,25 +1018,25 @@ function edit(rec, preset = {}) {
   editor.showModal(); if (!ro) field("titel").focus();
 }
 function updateVisHint() {
-  const h = $("visHint"), b = field("bereich").value;
-  // Trainer-Häkchen nur in Bereichen, die nicht nur für den Vorstand sind
-  const trOk = !vorstandOnly(b);
+  const h = $("visHint"), b = field("bereich").value, ro = $("save").hidden;
+  // Trainer-Häkchen nur in Bereichen, in denen es erlaubt ist (nie in Vorstands- oder Fest-Bereichen)
+  const trOk = AUSSCHUSS_GROUPS.includes(b);
   if (!trOk) field("fuer_trainer").checked = false;
-  field("fuer_trainer").disabled = !trOk || isTrainer();
-  field("mannschaft_id").disabled = !field("fuer_trainer").checked || isTrainer();
-  if (isTrainer()) { h.textContent = ""; return; }
-  const tr = field("fuer_trainer").checked ? ` 🏃 ${field("mannschaft_id").value ? "Trainer von " + teamName(field("mannschaft_id").value) : "Alle Trainer"} sehen ihn auch.` : " Trainer sehen ihn nicht.";
-  if (!isVorstand()) { h.className = "vishint"; h.textContent = `👥 Vorstand und Ausschuss sehen diesen Eintrag.${tr}`; return; }
+  field("fuer_trainer").disabled = !trOk || ro;
+  field("mannschaft_id").disabled = !field("fuer_trainer").checked || ro;
+  $("trainerWrap").hidden = ro || !trOk;
+  if (ro) { h.textContent = ""; return; }
+  // Wer sieht den Eintrag? Laut Rechte-Matrix (vom Server) + Admins + ggf. Trainer
+  const who = [...(me.sichtbar?.[b] || []), "Admins"];
+  const tr = field("fuer_trainer").checked ? ` 🏃 ${field("mannschaft_id").value ? "Trainer von " + teamName(field("mannschaft_id").value) : "Alle Trainer"} sehen ihn auch.` : "";
   h.className = "vishint" + (vorstandOnly(b) ? " vorstand" : "");
-  h.textContent = vorstandOnly(b)
-    ? `🔒 Nur der Vorstand sieht diesen Eintrag. Soll der Ausschuss ihn auch sehen, wähle z. B. den Bereich „Kalender“.`
-    : `👥 Vorstand und Ausschuss sehen diesen Eintrag.${tr}`;
+  h.textContent = (vorstandOnly(b) ? "🔒 Nur der Vorstand (und Admins) sieht diesen Eintrag." : `👥 Sichtbar für: ${who.join(", ")}.`) + tr;
 }
 field("bereich").addEventListener("change", updateVisHint);
 field("fuer_trainer").addEventListener("change", updateVisHint);
 field("mannschaft_id").addEventListener("change", updateVisHint);
 function renderAttachList(rec) {
-  $("attachList").innerHTML = (rec?.anhaenge || []).map(a => `<span><button type="button" class="quiet chip" data-att="${esc(a.id)}">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>${me.darf_loeschen ? `<button type="button" class="quiet danger chip" data-attdel="${esc(a.id)}" aria-label="${esc(a.dateiname)} löschen">✕</button>` : ""}</span>`).join("");
+  $("attachList").innerHTML = (rec?.anhaenge || []).map(a => `<span><button type="button" class="quiet chip" data-att="${esc(a.id)}">📎 ${esc(a.dateiname)} <small>(${fmtBytes(a.groesse)})</small></button>${rec && canD(rec.bereich) ? `<button type="button" class="quiet danger chip" data-attdel="${esc(a.id)}" aria-label="${esc(a.dateiname)} löschen">✕</button>` : ""}</span>`).join("");
 }
 field("datei").onchange = async () => {
   const f = field("datei").files[0], box = $("importBox");
@@ -987,7 +1125,7 @@ const docForm = $("docForm"), docEditor = $("docEditor"), dfield = n => docForm.
 function editDoc(id) {
   activeDocId = id || null; const d = docs.find(x => x.id === id);
   $("docFormTitle").textContent = d ? "Dokument bearbeiten" : "Dokument hinzufügen";
-  $("docRemove").hidden = !d; $("docError").textContent = "";
+  $("docRemove").hidden = !d || !canD("Dokumente"); $("docError").textContent = "";
   dfield("titel").value = d?.titel || ""; dfield("beschreibung").value = d?.beschreibung || "";
   dfield("status").value = d?.status || "Entwurf"; dfield("datum").value = d?.datum || today(); dfield("datei").value = "";
   $("docFileInfo").textContent = d?.groesse ? `Aktuell: ${d.dateiname} (${fmtBytes(d.groesse)}) – neue Datei wählen, um sie zu ersetzen.` : "Noch keine Datei hinterlegt.";
@@ -1032,37 +1170,37 @@ function editUser(id) {
   $("userFormTitle").textContent = u ? "Benutzer bearbeiten" : "Benutzer anlegen";
   ufield("benutzername").value = u?.benutzername || ""; ufield("benutzername").disabled = !!u;
   ufield("anzeigename").value = u?.anzeigename || ""; ufield("rolle").value = u?.rolle || "ausschuss";
-  ufield("ist_admin").checked = !!u?.ist_admin; ufield("ist_schatzmeister").checked = !!u?.ist_schatzmeister; ufield("aktiv").checked = u ? u.aktiv : true;
+  ufield("ist_admin").checked = !!u?.ist_admin; ufield("aktiv").checked = u ? u.aktiv : true;
   ufield("passwort").value = u ? "" : genPassword(); ufield("passwort").required = !u;
   $("pwWrap").hidden = $("pwGen").hidden = !!u; $("activeWrap").hidden = !u;
   $("userRemove").hidden = $("userReset").hidden = !u || u.id === me.id;
-  const mine = u?.mannschaften || [];
+  const mine = u?.mannschaften || [], myF = u?.funktionen || [];
+  // Funktionen nach Gruppe, Mehrfachauswahl
+  $("funcChecks").innerHTML = ["Vorstand", "Ausschuss", "Sport", "Fest", "Sonstige"].map(g => {
+    const list = funktionen.filter(f => f.gruppe === g && (f.aktiv || myF.includes(f.id)));
+    return list.length ? `<div class="fgroup"><b>${g}</b>${list.map(f => `<label class="check"><input type="checkbox" data-func="${esc(f.id)}" data-key="${esc(f.schluessel)}"${myF.includes(f.id) ? " checked" : ""}> ${esc(f.name)}${f.aktiv ? "" : " (deaktiviert)"}</label>`).join("")}</div>` : "";
+  }).join("");
   $("teamChecks").innerHTML = teams.filter(t => t.aktiv || mine.includes(t.id)).map(t => `<label class="check"><input type="checkbox" data-team="${esc(t.id)}"${mine.includes(t.id) ? " checked" : ""}> ${esc(t.name)}</label>`).join("")
     || '<p class="muted small">Noch keine Mannschaften angelegt (Mitglieder → Mannschaftsliste).</p>';
   $("userError").textContent = ""; syncAdminBox();
   userEditor.showModal();
 }
-// Admin/Schatzmeister nur für Vorstand, Mannschaften nur für Trainer
+// Admin und Schatzmeister/in nur mit Grundrolle Vorstand; Mannschaften nur für Trainer/Co-Trainer/Betreuer
 function syncAdminBox() {
   const r = ufield("rolle").value, v = r === "vorstand";
-  for (const k of ["ist_admin", "ist_schatzmeister"]) { ufield(k).disabled = !v; if (!v) ufield(k).checked = false; }
-  $("adminWrap").hidden = $("schatzWrap").hidden = !v; $("teamWrap").hidden = r !== "trainer";
+  ufield("ist_admin").disabled = !v; if (!v) ufield("ist_admin").checked = false; $("adminWrap").hidden = !v;
+  for (const c of $("funcChecks").querySelectorAll('[data-key="schatzmeister"]')) { c.disabled = !v; if (!v) c.checked = false; }
+  const teamFn = [...$("funcChecks").querySelectorAll("[data-func]:checked")].some(c => ["trainer", "co_trainer", "betreuer"].includes(c.dataset.key));
+  $("teamWrap").hidden = !(r === "trainer" || teamFn);
 }
 ufield("rolle").onchange = syncAdminBox;
-async function toggleSchatz(id) {
-  const u = users.find(x => x.id === id); if (!u) return;
-  if (!confirm(`${u.anzeigename}: Schatzmeister-Recht ${u.ist_schatzmeister ? "entziehen" : "geben"}?`)) return;
-  try { users = (await api("/api/benutzer/" + id, { method: "PUT", data: { ist_schatzmeister: !u.ist_schatzmeister } })).benutzer;
-    if (id === me.id) { me = (await api("/api/ich")).benutzer; $("userRole").textContent = rightsLabel(me); await reload(); } else render();
-    notice(`Schatzmeister-Recht ${u.ist_schatzmeister ? "entzogen" : "gegeben"}.`, true); }
-  catch (e) { notice(e.message); }
-}
+$("funcChecks").addEventListener("change", syncAdminBox);
 userForm.onsubmit = async e => {
   e.preventDefault(); $("userError").textContent = "";
-  const data = { anzeigename: ufield("anzeigename").value.trim(), rolle: ufield("rolle").value, ist_admin: ufield("ist_admin").checked,
-    ist_schatzmeister: ufield("ist_schatzmeister").checked, aktiv: ufield("aktiv").checked,
-    mannschaften: [...$("teamChecks").querySelectorAll("[data-team]:checked")].map(x => x.dataset.team) };
-  if (data.rolle === "trainer" && !data.mannschaften.length && !confirm("Diesem Trainer ist keine Mannschaft zugeordnet. Er sieht dann keine Mitglieder und Eltern. Trotzdem speichern?")) return;
+  const data = { anzeigename: ufield("anzeigename").value.trim(), rolle: ufield("rolle").value, ist_admin: ufield("ist_admin").checked, aktiv: ufield("aktiv").checked,
+    funktionen: [...$("funcChecks").querySelectorAll("[data-func]:checked")].map(x => x.dataset.func),
+    mannschaften: $("teamWrap").hidden ? [] : [...$("teamChecks").querySelectorAll("[data-team]:checked")].map(x => x.dataset.team) };
+  if (!$("teamWrap").hidden && !data.mannschaften.length && !confirm("Keine Mannschaft zugeordnet. Die Person sieht dann keine Mitglieder und Eltern. Trotzdem speichern?")) return;
   try {
     if (activeUserId) users = (await api("/api/benutzer/" + activeUserId, { method: "PUT", data })).benutzer;
     else {
@@ -1103,7 +1241,7 @@ const MEMBER_INPUTS = ["vorname","nachname","geburtsdatum","email","telefon","ei
 function editMember(id) {
   activeMemberId = id || null; const m = members.find(x => x.id === id);
   $("memberFormTitle").textContent = m ? memberName(m) : "Mitglied anlegen";
-  $("memberHint").hidden = !!m; $("memberRemove").hidden = !m || !me.darf_loeschen; $("memberError").textContent = "";
+  $("memberHint").hidden = !!m; $("memberRemove").hidden = !m || !canD("Mitglieder"); $("memberError").textContent = "";
   mfield("status").innerHTML = options(MEMBER_STATUSES, m?.status || "Aktiv");
   for (const k of MEMBER_INPUTS) mfield(k).value = m?.[k] ?? "";
   mfield("mannschaft_id").innerHTML = teamOptions(m?.mannschaft_id || "", m?.mannschaft_id ? "" : m?.mannschaft);
@@ -1129,20 +1267,23 @@ $("memberRemove").onclick = async () => {
 };
 
 const parentForm = $("parentForm"), pfield = n => parentForm.elements.namedItem(n);
-const PARENT_KEYS = ["name","email","kind","mannschaft","mannschaft_id","notiz"];
+const PARENT_KEYS = ["name","email","kind","mannschaft","mannschaft_id","notiz","einwilligung","einwilligung_datum"];
 const PARENT_INPUTS = ["name","email","kind","notiz"];
 function editParent(id) {
-  if (isTrainer()) return;
+  if (!D().eltern_alle) return;
   activeParentId = id || null; const p = parents.find(x => x.id === id);
   $("parentFormTitle").textContent = p ? "Eltern bearbeiten" : "Eltern hinzufügen";
-  $("parentHint").hidden = !!p; $("parentRemove").hidden = !p || !me.darf_loeschen; $("parentError").textContent = "";
+  $("parentHint").hidden = !!p; $("parentRemove").hidden = !p; $("parentError").textContent = "";
   for (const k of PARENT_INPUTS) pfield(k).value = p?.[k] ?? "";
+  pfield("einwilligung").checked = !!p?.einwilligung; pfield("einwilligung_datum").value = p?.einwilligung_datum || "";
   pfield("mannschaft_id").innerHTML = teamOptions(p?.mannschaft_id || "", p?.mannschaft_id ? "" : p?.mannschaft);
   $("parentEditor").showModal(); pfield("name").focus();
 }
+pfield("einwilligung").onchange = () => { if (pfield("einwilligung").checked && !pfield("einwilligung_datum").value) pfield("einwilligung_datum").value = today(); };
 parentForm.onsubmit = async e => {
   e.preventDefault(); $("parentError").textContent = "";
   const data = { ...Object.fromEntries(PARENT_INPUTS.map(k => [k, String(pfield(k).value || "").trim()])),
+    einwilligung: pfield("einwilligung").checked, einwilligung_datum: pfield("einwilligung").checked ? pfield("einwilligung_datum").value : "",
     ...teamFromSelect(pfield("mannschaft_id"), parents.find(x => x.id === activeParentId)) };
   if (!EMAIL_RE.test(data.email)) { $("parentError").textContent = "Bitte eine gültige E-Mail-Adresse eingeben."; return; }
   if (!activeParentId && parents.some(p => p.email.toLowerCase() === data.email.toLowerCase()) && !confirm(`${data.email} steht schon im Verteiler. Trotzdem noch einmal eintragen?`)) return;
@@ -1163,14 +1304,16 @@ $("parentRemove").onclick = async () => {
 const mailForm = $("mailForm"), xfield = n => mailForm.elements.namedItem(n);
 // Gruppen-Schlüssel: Mannschaft aus der Liste, sonst der alte Freitext
 const mailKey = p => p.mannschaft_id || (p.mannschaft ? "txt:" + p.mannschaft : "");
-const recipients = () => { const t = xfield("mannschaft").value; return [...new Set(parents.filter(p => !t || mailKey(p) === t).map(p => p.email.toLowerCase()))]; };
-function updateMailCount() { const n = recipients().length; $("mailCount").textContent = n ? `${n} Empfänger` : "Keine Empfänger für diese Auswahl."; }
+// Nur Eltern mit Einwilligung bekommen E-Mails
+const consented = () => parents.filter(p => p.einwilligung);
+const recipients = () => { const t = xfield("mannschaft").value; return [...new Set(consented().filter(p => !t || mailKey(p) === t).map(p => p.email.toLowerCase()))]; };
+function updateMailCount() { const n = recipients().length; $("mailCount").textContent = n ? `${n} Empfänger (alle im BCC)` : "Keine Empfänger für diese Auswahl."; }
 function openMail(entryId) {
-  if (!parents.length) return notice(isTrainer() ? "Für deine Mannschaft sind noch keine Eltern-Adressen hinterlegt." : "Im Eltern-Verteiler stehen noch keine Adressen. Füge sie oben bei „Eltern-Verteiler“ hinzu.");
-  const r = entries.find(x => x.id === entryId);
-  const groups = [...new Set(parents.map(mailKey).filter(Boolean))].map(k => [k, k.startsWith("txt:") ? k.slice(4) + " (nicht zugeordnet)" : teamName(k)]).sort((a, b) => a[1].localeCompare(b[1], "de"));
-  const count = k => new Set(parents.filter(p => mailKey(p) === k).map(p => p.email.toLowerCase())).size;
-  xfield("mannschaft").innerHTML = `<option value="">${isTrainer() ? "Alle meine Eltern" : "Alle Eltern"} (${new Set(parents.map(p => p.email.toLowerCase())).size})</option>` +
+  if (!consented().length) return notice(D().eltern_alle ? "Es gibt noch keine Eltern-Adressen mit Einwilligung." : "Für deine Mannschaft sind noch keine Eltern-Adressen (mit Einwilligung) hinterlegt.");
+  const r = entries.find(x => x.id === entryId), list = consented();
+  const groups = [...new Set(list.map(mailKey).filter(Boolean))].map(k => [k, k.startsWith("txt:") ? k.slice(4) + " (nicht zugeordnet)" : teamName(k)]).sort((a, b) => a[1].localeCompare(b[1], "de"));
+  const count = k => new Set(list.filter(p => mailKey(p) === k).map(p => p.email.toLowerCase())).size;
+  xfield("mannschaft").innerHTML = `<option value="">${D().eltern_alle ? "Alle Eltern" : "Alle meine Eltern"} (${new Set(list.map(p => p.email.toLowerCase())).size})</option>` +
     groups.map(([k, label]) => `<option value="${esc(k)}">Nur ${esc(label)} (${count(k)})</option>`).join("");
   xfield("betreff").value = r ? r.titel : ""; xfield("text").value = r ? r.inhalt : "";
   $("mailError").textContent = ""; updateMailCount(); $("mailDialog").showModal();
@@ -1257,7 +1400,7 @@ function editDownload(id, cat) {
   dlfield("kategorie").innerHTML = options(DL_CATS, d?.kategorie || cat || DL_CATS[0]);
   dlfield("titel").value = d?.titel || ""; dlfield("beschreibung").value = d?.beschreibung || ""; dlfield("datei").value = "";
   $("dlFileInfo").textContent = d?.groesse ? `Aktuell: ${d.dateiname} (${fmtBytes(d.groesse)}) – neue Datei wählen, um sie zu ersetzen.` : "";
-  $("dlRemove").hidden = !d || !me.darf_loeschen; $("dlError").textContent = "";
+  $("dlRemove").hidden = !d || !canD("Downloads"); $("dlError").textContent = "";
   $("dlEditor").showModal();
 }
 dlfield("datei").onchange = () => { const f = dlfield("datei").files[0]; if (f && !dlfield("titel").value.trim()) dlfield("titel").value = f.name.replace(/\.[^.]+$/, "").slice(0, 160); };
@@ -1416,8 +1559,8 @@ function viewInvoice(id) {
   viewInvoiceId = id;
   $("invoiceViewBody").innerHTML = `<div class="previewwrap" style="margin:0">${invoiceHtml(parseInv(raw))}</div>
     <p class="muted small" style="margin-top:8px">Erstellt ${esc(fmtTime(raw.erstellt))} von ${esc(raw.erstellt_von)}${raw.geaendert !== raw.erstellt ? ` · zuletzt geändert ${esc(fmtTime(raw.geaendert))} von ${esc(raw.geaendert_von)}` : ""}</p>`;
-  $("invStorno").hidden = !isVorstand() || raw.status === "Storniert";
-  $("invPaid").hidden = raw.status !== "Offen"; $("invOpen").hidden = raw.status !== "Bezahlt"; $("invEdit").hidden = raw.status === "Storniert";
+  $("invStorno").hidden = !D().stornieren || raw.status === "Storniert";
+  $("invPaid").hidden = !isSchatz() || raw.status !== "Offen"; $("invOpen").hidden = !isSchatz() || raw.status !== "Bezahlt"; $("invEdit").hidden = !isSchatz() || raw.status === "Storniert";
   $("invoiceError").textContent = "";
   if (!$("invoiceView").open) $("invoiceView").showModal();
 }
@@ -1596,7 +1739,7 @@ function renderKasse() {
   const months = ["01","02","03","04","05","06","07","08","09","10","11","12"], mName = m => new Intl.DateTimeFormat("de-DE", { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(2000, Number(m) - 1, 1)));
   $("view").innerHTML = `<div class="sectionhead"><h2>Kasse</h2><div class="actions" style="margin:0">
       ${isSchatz() ? '<button class="quiet" data-act="kasseSettings">Einstellungen</button>' : ""}<button class="quiet" data-act="kasseCsv">CSV ${esc(kFilter.jahr || "alle Jahre")}</button></div></div>
-    ${isSchatz() ? "" : '<p class="muted small" style="margin-bottom:12px">Nur lesen – buchen und stornieren darf nur der Schatzmeister.</p>'}
+    ${isSchatz() ? "" : '<p class="muted small" style="margin-bottom:12px">Nur lesen (Kassenprüfung) – buchen dürfen Admins und Schatzmeister/in, stornieren nur Schatzmeister/in.</p>'}
     <div class="stats">
       <div class="stat"><strong>${fmtEur(st.bar)}</strong>Kassenstand Bar</div>
       <div class="stat"><strong>${fmtEur(st.bank)}</strong>Kontostand Bank</div>
@@ -1626,7 +1769,7 @@ function renderKasseTable() {
         ${(b.belege || []).map(x => `<button class="quiet chip" data-beleg="${esc(x.id)}">📎 ${esc(x.dateiname)}</button>`).join(" ")}</td>
       <td>${esc(b.kategorie)}</td><td>${b.zahlungsweg === "bar" ? "Bar" : "Bank"}</td>
       <td class="money ${b.art === "einnahme" ? "k-in" : "k-out"}">${b.art === "einnahme" ? "+" : "−"} ${fmtEur(b.betrag)}</td>
-      <td style="white-space:nowrap">${isSchatz() ? `<button class="quiet" data-kbeleg="${esc(b.id)}" title="Beleg anhängen">📎</button>${b.storniert ? "" : ` <button class="quiet danger" data-kstorno="${esc(b.id)}">Storno</button>`}` : ""}</td></tr>`).join("")
+      <td style="white-space:nowrap">${isSchatz() ? `<button class="quiet" data-kbeleg="${esc(b.id)}" title="Beleg anhängen">📎</button>${b.storniert || !D().stornieren ? "" : ` <button class="quiet danger" data-kstorno="${esc(b.id)}">Storno</button>`}` : ""}</td></tr>`).join("")
       || '<tr><td colspan="7" class="muted">Keine Treffer.</td></tr>'}
     </tbody></table></div>`;
 }
@@ -1712,10 +1855,185 @@ ksForm.onsubmit = async e => {
   catch (err) { $("kasseSettingsError").textContent = err.message; }
 };
 
+/* ---------------- Funktionen (Admin) ---------------- */
+async function funcApi(path, method, data, msg) {
+  try { funktionen = (await api(path, { method, data })).funktionen; users = (await api("/api/benutzer")).benutzer; renderUsers(); notice(msg, true); }
+  catch (e) { notice(e.message); }
+}
+function addFunc() {
+  const name = prompt("Name der neuen Funktion (z. B. Kioskdienst):"); if (!name?.trim()) return;
+  const g = prompt("Gruppe: 1 = Vorstand, 2 = Ausschuss, 3 = Sport, 4 = Fest, 5 = Sonstige", "5"); if (g === null) return;
+  funcApi("/api/funktionen", "POST", { name: name.trim(), gruppe: ["Vorstand", "Ausschuss", "Sport", "Fest", "Sonstige"][Number(g) - 1] || "Sonstige" }, "Funktion angelegt. Rechte dafür unter „Rechte“ einstellen.");
+}
+function renameFunc(id) {
+  const f = funktionen.find(x => x.id === id); if (!f) return;
+  const name = prompt("Neuer Name:", f.name); if (!name?.trim() || name.trim() === f.name) return;
+  funcApi("/api/funktionen/" + id, "PUT", { name: name.trim() }, "Funktion umbenannt.");
+}
+function toggleFunc(id) {
+  const f = funktionen.find(x => x.id === id); if (!f) return;
+  if (!confirm(f.aktiv ? `„${f.name}“ deaktivieren?\n\nAlle Konten mit dieser Funktion verlieren sofort die Rechte daraus.` : `„${f.name}“ wieder aktivieren?`)) return;
+  funcApi("/api/funktionen/" + id, "PUT", { name: f.name, aktiv: !f.aktiv }, f.aktiv ? "Funktion deaktiviert." : "Funktion aktiviert.");
+}
+async function setKp(on) {
+  try { matrix = await api("/api/rechte/kassenpruefer", { method: "PUT", data: { an: on } }); notice(on ? "Kassenprüfer/in darf Rechnungen und Kasse lesen." : "Kassenprüfer/in hat keinen Zugriff mehr auf Rechnungen und Kasse.", true); }
+  catch (e) { notice(e.message); }
+}
+document.addEventListener("change", e => {
+  if (e.target.matches(".mcell")) return setMatrix(e.target);
+  if (e.target.dataset.act === "kpToggle") return setKp(e.target.checked);
+});
+
+/* ---------------- Chat (Polling: 5 s im offenen Raum, 30 s für die Zähler) ---------------- */
+let chatOpen = null, chatMsgs = [], chatLast = 0, chatT = "", chatMod = false, chatTimer = null, lastListPoll = 0, lastMsgPoll = 0, chatBusy = false;
+const roomById = id => chatRooms.find(r => r.id === id);
+function chatHomeCard(always) {
+  const unread = chatRooms.filter(r => r.mitglied && r.ungelesen);
+  if (!unread.length && !always) return "";
+  return `<section class="card"><div class="cardtop"><h2>Chat</h2><a class="link" href="${route(IDX("Chat"))}">öffnen</a></div>
+    ${unread.length ? unread.map(r => `<button class="mini" data-room="${esc(r.id)}">${esc(r.name)}<small>${r.ungelesen} neue Nachricht${r.ungelesen === 1 ? "" : "en"}${r.erwaehnt ? " · du wurdest erwähnt" : ""}</small></button>`).join("") : '<p class="muted">Keine neuen Nachrichten.</p>'}</section>`;
+}
+function renderChat() {
+  if (pendingRoom) { const id = pendingRoom; pendingRoom = null; return openRoom(id); }
+  const mine = chatRooms.filter(r => r.mitglied), manage = chatRooms.filter(r => !r.mitglied && r.verwalten);
+  const item = r => `<button class="roomitem${chatOpen === r.id ? " on" : ""}" data-room="${esc(r.id)}"><span><b>${esc(r.name)}</b><small>${esc(r.beschreibung || (r.alle ? "Alle angemeldeten" : ""))}</small></span>
+    <span class="roombadges">${r.erwaehnt ? '<span class="count at">@</span>' : ""}${r.ungelesen ? `<span class="count unread">${r.ungelesen}</span>` : ""}</span></button>`;
+  $("view").innerHTML = `<div class="chat${chatOpen ? " open" : ""}">
+    <aside class="roomlist"><div class="sectionhead" style="margin:0 0 8px"><h2>Chat</h2></div>
+      ${mine.map(item).join("") || '<p class="muted small">Du bist in keinem Raum Mitglied.</p>'}
+      ${manage.length ? `<p class="muted small" style="margin:14px 0 4px">Von dir verwaltet, du bist kein Mitglied (Nachrichten nicht lesbar):</p>
+        ${manage.map(r => `<div class="roomitem off"><span><b>${esc(r.name)}</b></span><button class="quiet" data-roomedit="${esc(r.id)}">Verwalten</button></div>`).join("")}` : ""}
+    </aside>
+    <section class="room" id="room">${chatOpen ? "" : '<p class="muted" style="padding:20px">Wähle links einen Raum.</p>'}</section></div>`;
+  if (chatOpen) renderRoom();
+}
+function msgHtml(m) {
+  const own = m.benutzer_id === me.id;
+  const text = esc(m.text).replace(/(^|\s)(@[\wÄÖÜäöüß.\-]+(?: [\wÄÖÜäöüß.\-]+)?)/g, (all, sp, at) => `${sp}<mark class="${me.anzeigename && at.slice(1).toLowerCase().startsWith(me.anzeigename.toLowerCase().split(" ")[0]) ? "me" : ""}">${at}</mark>`).replace(/\n/g, "<br>");
+  return `<div class="msg${own ? " own" : ""}" id="m${m.id}"><div class="mhead"><b>${esc(m.autor)}</b> <span class="lock">${esc(fmtTime(m.erstellt))}${m.bearbeitet && !m.geloescht ? " · bearbeitet" : ""}</span>
+    ${!m.geloescht && (own || chatMod) ? `<span class="mtools">${own ? `<button class="linkbtn" data-msgedit="${m.id}">bearbeiten</button>` : ""}<button class="linkbtn" data-msgdel="${m.id}">löschen</button></span>` : ""}</div>
+    <div class="mtext">${m.geloescht ? '<i class="lock">Nachricht gelöscht</i>' : text}</div></div>`;
+}
+function renderRoom() {
+  const r = roomById(chatOpen), el = $("room"); if (!r || !el) return;
+  el.innerHTML = `<div class="roomhead"><button class="quiet back" data-act="chatBack" aria-label="Zurück zur Raumliste">‹</button>
+      <div><b>${esc(r.name)}</b><div class="lock">${esc(r.beschreibung)}</div></div>${r.verwalten ? `<button class="quiet" data-roomedit="${esc(r.id)}">Verwalten</button>` : ""}</div>
+    <div class="msgs" id="msgs">${chatMsgs.map(msgHtml).join("") || '<p class="muted" style="padding:12px">Noch keine Nachrichten. Schreib die erste!</p>'}</div>
+    <form class="composer" id="composer"><textarea id="chatText" rows="2" maxlength="4000" placeholder="Nachricht schreiben … (@Name erwähnt jemanden)" aria-label="Nachricht"></textarea>
+      <button id="chatSend">Senden</button></form>`;
+  const box = $("msgs"); box.scrollTop = box.scrollHeight;
+  // Handy: Raum (mit Eingabefeld) ganz ins Bild holen
+  if (matchMedia("(max-width:780px)").matches) el.scrollIntoView({ block: "start" });
+  $("composer").onsubmit = e => { e.preventDefault(); sendMsg(); };
+  $("chatText").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); sendMsg(); } };
+}
+function updateMsgs() {
+  const box = $("msgs"); if (!box) return;
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.innerHTML = chatMsgs.map(msgHtml).join("") || '<p class="muted" style="padding:12px">Noch keine Nachrichten. Schreib die erste!</p>';
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+function mergeMsgs(list) {
+  for (const m of list) { const i = chatMsgs.findIndex(x => x.id === m.id); if (i >= 0) chatMsgs[i] = m; else chatMsgs.push(m); chatLast = Math.max(chatLast, m.id); }
+  chatMsgs.sort((a, b) => a.id - b.id);
+}
+let pendingRoom = null;
+async function openRoom(id) {
+  if (IDX("Chat") !== section) { pendingRoom = id; location.hash = route(IDX("Chat")); return; }
+  chatOpen = id; chatMsgs = []; chatLast = 0;
+  renderChat();
+  try { const r = await api(`/api/chat/${id}`); chatMod = r.moderieren; chatT = r.jetzt; mergeMsgs(r.nachrichten); updateMsgs(); await markRead(); }
+  catch (e) { notice(e.message); }
+}
+async function pollMsgs() {
+  if (!chatOpen || chatBusy) return;
+  chatBusy = true;
+  try {
+    const r = await api(`/api/chat/${chatOpen}?seit=${chatLast}&t=${encodeURIComponent(chatT)}`);
+    chatT = r.jetzt; chatMod = r.moderieren;
+    if (r.nachrichten.length) { mergeMsgs(r.nachrichten); updateMsgs(); await markRead(); }
+  } catch {} finally { chatBusy = false; }
+}
+async function markRead() {
+  if (!chatOpen || !chatLast) return;
+  try { await api(`/api/chat/${chatOpen}/gelesen`, { method: "POST", data: { bis: chatLast } }); } catch {}
+  const r = roomById(chatOpen); if (r) { r.ungelesen = 0; r.erwaehnt = 0; }
+  renderNav(); for (const b of document.querySelectorAll(`.roomitem[data-room="${chatOpen}"] .roombadges`)) b.innerHTML = "";
+}
+async function sendMsg() {
+  const ta = $("chatText"), text = ta.value.trim(); if (!text || !chatOpen) return;
+  if (text.length > 4000) return notice("Höchstens 4000 Zeichen.");
+  $("chatSend").disabled = true;
+  try { const r = await api(`/api/chat/${chatOpen}`, { method: "POST", data: { text } }); ta.value = ""; mergeMsgs([r.nachricht]); updateMsgs(); $("msgs").scrollTop = $("msgs").scrollHeight; }
+  catch (e) { notice(e.message); }
+  finally { $("chatSend").disabled = false; ta.focus(); }
+}
+async function editMsg(id) {
+  const m = chatMsgs.find(x => x.id === id); if (!m) return;
+  const text = prompt("Nachricht bearbeiten:", m.text); if (text === null || !text.trim() || text === m.text) return;
+  try { await api(`/api/chat/nachricht/${id}`, { method: "PUT", data: { text: text.trim() } }); m.text = text.trim(); m.bearbeitet = new Date().toISOString(); updateMsgs(); }
+  catch (e) { notice(e.message); }
+}
+async function deleteMsg(id) {
+  const m = chatMsgs.find(x => x.id === id); if (!m || !confirm(m.benutzer_id === me.id ? "Deine Nachricht löschen?" : `Nachricht von ${m.autor} als Raum-Admin entfernen?`)) return;
+  try { await api(`/api/chat/nachricht/${id}`, { method: "DELETE" }); m.geloescht = true; m.text = ""; updateMsgs(); }
+  catch (e) { notice(e.message); }
+}
+async function refreshRooms() {
+  try {
+    chatRooms = (await api("/api/chat")).raeume; renderNav();
+    if (sections[section] === "Chat" && !chatOpen) renderChat();
+    else if (sections[section] === "Chat") for (const r of chatRooms) { const b = document.querySelector(`.roomitem[data-room="${r.id}"] .roombadges`); if (b && r.id !== chatOpen) b.innerHTML = `${r.erwaehnt ? '<span class="count at">@</span>' : ""}${r.ungelesen ? `<span class="count unread">${r.ungelesen}</span>` : ""}`; }
+  } catch {}
+}
+// Ein Takt alle 5 s: offener Raum bei sichtbarem Tab alle 5 s, Zähler alle 30 s (auch im Hintergrund)
+function startChatPolling() {
+  clearInterval(chatTimer); lastListPoll = Date.now();
+  chatTimer = setInterval(() => {
+    if (!me) return clearInterval(chatTimer);
+    const now = Date.now(), visible = document.visibilityState === "visible";
+    if (visible && chatOpen && sections[section] === "Chat" && now - lastMsgPoll >= 5000) { lastMsgPoll = now; pollMsgs(); }
+    if (now - lastListPoll >= 30000) { lastListPoll = now; refreshRooms(); }
+  }, 5000);
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && me) { refreshRooms(); if (chatOpen) pollMsgs(); } });
+
+// Räume anlegen/verwalten (Admin: alle; Festwirt/in: nur für sein Festwirt-Team)
+const roomForm = $("roomForm"), rfield = n => roomForm.elements.namedItem(n);
+let activeRoomId = null;
+function editRoom(id) {
+  const r = id ? roomById(id) : null, rules = r?.regeln || [], has = (t, v) => rules.some(x => x.typ === t && x.wert === v);
+  const admin = !!me.ist_admin;
+  activeRoomId = id || null;
+  $("roomFormTitle").textContent = r ? "Raum verwalten" : "Neuer Raum";
+  rfield("name").value = r?.name || ""; rfield("beschreibung").value = r?.beschreibung || "";
+  rfield("alle").checked = !!r?.alle; rfield("aktiv").checked = r ? r.aktiv : true;
+  $("roomAlleWrap").hidden = !admin;
+  const check = (t, v, label) => `<label class="check"><input type="checkbox" data-rt="${t}" data-rv="${esc(v)}"${has(t, v) ? " checked" : ""}> ${esc(label)}</label>`;
+  const ft = funktionen.find(f => f.schluessel === "festwirt_team");
+  const people = admin ? users.filter(u => u.aktiv) : teamUsers.filter(u => u.aktiv);
+  $("roomRules").innerHTML = (admin ? `<div class="fgroup"><b>Grundrollen</b>${Object.entries(ROLE).map(([k, l]) => check("rolle", k, l)).join("")}</div>
+      <div class="fgroup"><b>Funktionen</b>${funktionen.filter(f => f.aktiv).map(f => check("funktion", f.id, f.name)).join("")}</div>`
+    : `<div class="fgroup"><b>Funktion</b>${ft ? check("funktion", ft.id, ft.name + " (alle)") : ""}</div>`)
+    + `<div class="fgroup"><b>Einzelne Personen</b>${people.map(u => check("person", u.id, u.anzeigename)).join("") || '<span class="lock">keine</span>'}</div>`;
+  $("roomHint").textContent = admin ? "Admins verwalten Räume, lesen die Nachrichten aber nur, wenn sie selbst Mitglied sind." : "Als Festwirt/in kannst du Räume nur für dein Festwirt-Team anlegen. Du bist automatisch Mitglied.";
+  $("roomError").textContent = ""; $("roomEditor").showModal(); rfield("name").focus();
+}
+roomForm.onsubmit = async e => {
+  e.preventDefault(); $("roomError").textContent = "";
+  const data = { name: rfield("name").value.trim(), beschreibung: rfield("beschreibung").value.trim(), alle: rfield("alle").checked, aktiv: rfield("aktiv").checked,
+    regeln: [...$("roomRules").querySelectorAll("[data-rt]:checked")].map(x => ({ typ: x.dataset.rt, wert: x.dataset.rv })) };
+  if (!data.alle && !data.regeln.length && me.ist_admin) { $("roomError").textContent = "Bitte „Alle angemeldeten“ oder mindestens eine Rolle, Funktion oder Person wählen."; return; }
+  try { chatRooms = (await api(activeRoomId ? "/api/chat/raeume/" + activeRoomId : "/api/chat/raeume", { method: activeRoomId ? "PUT" : "POST", data })).raeume;
+    $("roomEditor").close(); notice("Raum gespeichert.", true); renderNav(); if (sections[section] === "Chat") renderChat(); }
+  catch (err) { $("roomError").textContent = err.message; }
+};
+
 /* ---------------- Ereignisse ---------------- */
 $("add").onclick = () => {
   const n = sections[section];
-  if (isTrainer()) return;
+  if (n === "Chat") return editRoom(null);
+  if (n === "Mein Team") return newTeamAccount();
   if (n === "Kasse") newBooking();
   else if (n === "Dokumente") editDoc(); else if (n === "Benutzer") editUser(); else if (n === "Mitglieder") editMember();
   else if (n === "Downloads") editDownload(); else if (n === "Rechnungen") newInvoice(); else edit();
@@ -1737,7 +2055,15 @@ document.addEventListener("click", async e => {
   if (ds.dledit) return editDownload(ds.dledit);
   if (ds.dlnew) return editDownload(null, ds.dlnew);
   if (ds.invview) return viewInvoice(ds.invview);
-  if (ds.schatz) return toggleSchatz(ds.schatz);
+  if (ds.utab) { uTab = ds.utab; return renderUsers(); }
+  if (ds.funcren) return renameFunc(ds.funcren);
+  if (ds.functog) return toggleFunc(ds.functog);
+  if (ds.teamtog) return teamToggle(ds.teamtog);
+  if (ds.teampw) return teamPassword(ds.teampw);
+  if (ds.room) return openRoom(ds.room);
+  if (ds.roomedit) return editRoom(ds.roomedit);
+  if (ds.msgedit) return editMsg(Number(ds.msgedit));
+  if (ds.msgdel) return deleteMsg(Number(ds.msgdel));
   if (ds.teamedit) return editTeam(ds.teamedit);
   if (ds.beleg) return openBeleg(ds.beleg);
   if (ds.kbeleg) { belegFor = ds.kbeleg; return $("kasseBelegFile").click(); }
@@ -1772,6 +2098,8 @@ document.addEventListener("click", async e => {
   if (ds.rsvp) return answer(ds.rsvp, ds.a);
   switch (ds.act) {
     case "settings": return openSettings();
+    case "addFunc": return addFunc();
+    case "chatBack": chatOpen = null; return renderChat();
     case "addTeam": return editTeam(null);
     case "kasseSettings": return openKasseSettings();
     case "kasseCsv": return exportKasseCsv();
